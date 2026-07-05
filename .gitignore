@@ -1,0 +1,59 @@
+# Build output
+out/
+build/
+release/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.obj
+*.o
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+*.ninja
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+CppProperties.json
+
+# Rust
+target/
+.rustc_info.json
+Cargo.lock
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Generated files
+src/generated/
+
+# Google Test (downloaded at build time)
+googletest-build/
+googletest-download/
+googletest-src/
+
+# Checksums / manifests
+checksummed_extra.txt
+checksummed_files.txt
+client.manifest
+server.versioninfo.rc
+client.versioninfo.rc
+
+# Data version
+data/data_version.txt
