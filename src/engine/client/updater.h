@@ -3,12 +3,11 @@
 
 #include <base/detect.h>
 #include <base/lock.h>
+#include <base/system.h>
 
 #include <engine/updater.h>
 
-#include <forward_list>
 #include <memory>
-#include <string>
 
 #define CLIENT_EXEC "DDNet"
 #define SERVER_EXEC "DDNet-Server"
@@ -39,15 +38,19 @@
 #define PLAT_CLIENT_EXEC CLIENT_EXEC PLAT_EXT
 #define PLAT_SERVER_EXEC SERVER_EXEC PLAT_EXT
 
-class CUpdaterFetchTask;
+class CHttpRequest;
 
 class CUpdater : public IUpdater
 {
-	friend class CUpdaterFetchTask;
+	enum class ETaskKind
+	{
+		NONE,
+		FETCH_RELEASE,
+		DOWNLOAD_ARCHIVE,
+	};
 
 	class IClient *m_pClient;
 	class IStorage *m_pStorage;
-	class IEngine *m_pEngine;
 	class CHttp *m_pHttp;
 
 	CLock m_Lock;
@@ -55,32 +58,24 @@ class CUpdater : public IUpdater
 	EUpdaterState m_State GUARDED_BY(m_Lock);
 	char m_aStatus[256] GUARDED_BY(m_Lock);
 	int m_Percent GUARDED_BY(m_Lock);
-	char m_aClientExecTmp[64];
-	char m_aServerExecTmp[64];
 
-	std::forward_list<std::pair<std::string, bool>> m_FileJobs;
-	std::shared_ptr<CUpdaterFetchTask> m_pCurrentTask;
-	decltype(m_FileJobs)::iterator m_CurrentJob;
+	std::shared_ptr<CHttpRequest> m_pCurrentTask;
+	ETaskKind m_TaskKind = ETaskKind::NONE;
 
-	bool m_ClientUpdate;
-	bool m_ServerUpdate;
+	char m_aLatestVersion[64];
+	char m_aArchiveName[128];
+	char m_aArchiveUrl[2048];
+	char m_aArchivePath[IO_MAX_PATH_LENGTH];
 
-	bool m_ClientFetched;
-	bool m_ServerFetched;
-
-	void AddFileJob(const char *pFile, bool Job);
-	void FetchFile(const char *pFile, const char *pDestPath = nullptr) REQUIRES(!m_Lock);
-	bool MoveFile(const char *pFile);
-
-	void ParseUpdate() REQUIRES(!m_Lock);
-	void PerformUpdate() REQUIRES(!m_Lock);
-	void RunningUpdate() REQUIRES(!m_Lock);
-	void CommitUpdate() REQUIRES(!m_Lock);
-
-	bool ReplaceClient();
-	bool ReplaceServer();
+	void ResetTask() REQUIRES(!m_Lock);
+	void StartReleaseFetch() REQUIRES(!m_Lock);
+	bool ParseReleaseTask() REQUIRES(!m_Lock);
+	void StartArchiveDownload() REQUIRES(!m_Lock);
+	bool LaunchApplyScriptAndQuit() REQUIRES(!m_Lock);
 
 	void SetCurrentState(EUpdaterState NewState) REQUIRES(!m_Lock);
+	void SetStatus(const char *pStatus) REQUIRES(!m_Lock);
+	void SetPercent(int Percent) REQUIRES(!m_Lock);
 
 public:
 	CUpdater();
@@ -90,6 +85,7 @@ public:
 	int GetCurrentPercent() override REQUIRES(!m_Lock);
 
 	void InitiateUpdate() REQUIRES(!m_Lock) override;
+	void ApplyUpdateAndRestart() REQUIRES(!m_Lock) override;
 	void Init(CHttp *pHttp);
 	void Update() REQUIRES(!m_Lock) override;
 };

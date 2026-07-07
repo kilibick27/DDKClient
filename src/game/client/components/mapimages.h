@@ -10,6 +10,7 @@
 #include <game/map/render_interfaces.h>
 #include <game/mapitems.h>
 
+
 enum EMapImageModType
 {
 	MAP_IMAGE_MOD_TYPE_DDNET = 0,

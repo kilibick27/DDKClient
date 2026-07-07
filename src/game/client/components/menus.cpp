@@ -27,6 +27,7 @@
 #include <generated/protocol.h>
 
 #include <game/client/animstate.h>
+#include <game/client/bc_ui_animations.h>
 #include <game/client/components/binds.h>
 #include <game/client/components/console.h>
 #include <game/client/components/key_binder.h>
@@ -42,6 +43,14 @@
 #include <vector>
 
 using namespace std::chrono_literals;
+
+namespace
+{
+	int NormalizeMenuPage(int Page)
+	{
+		return Page == CMenus::PAGE_IRC ? CMenus::PAGE_DEMOS : Page;
+	}
+}
 
 ColorRGBA CMenus::ms_GuiColor;
 ColorRGBA CMenus::ms_ColorTabbarInactiveOutgame;
@@ -59,6 +68,8 @@ float CMenus::ms_ListheaderHeight = 17.0f;
 
 CMenus::CMenus()
 {
+	m_aMenuSfxSamples.fill(-1);
+
 	m_Popup = POPUP_NONE;
 	m_MenuPage = 0;
 	m_GamePage = PAGE_GAME;
@@ -117,10 +128,15 @@ int CMenus::DoButton_Toggle(const void *pId, int Checked, const CUIRect *pRect, 
 	}
 	Graphics()->QuadsEnd();
 
-	return Active ? Ui()->DoButtonLogic(pId, Checked, pRect, Flags) : 0;
+	return Active ? Ui()->DoButtonLogic(pId, Checked, pRect, Flags, CUi::EButtonSoundType::CHECKBOX) : 0;
 }
 
 int CMenus::DoButton_Menu(CButtonContainer *pButtonContainer, const char *pText, int Checked, const CUIRect *pRect, const unsigned Flags, const char *pImageName, int Corners, float Rounding, float FontFactor, ColorRGBA Color)
+{
+	return DoButton_MenuEx(pButtonContainer, pText, Checked, pRect, Flags, pImageName, Corners, Rounding, FontFactor, Color, false);
+}
+
+int CMenus::DoButton_MenuEx(CButtonContainer *pButtonContainer, const char *pText, int Checked, const CUIRect *pRect, const unsigned Flags, const char *pImageName, int Corners, float Rounding, float FontFactor, ColorRGBA Color, bool AlwaysColoredImage)
 {
 	CUIRect Text = *pRect;
 
@@ -140,7 +156,7 @@ int CMenus::DoButton_Menu(CButtonContainer *pButtonContainer, const char *pText,
 		const CMenuImage *pImage = FindMenuImage(pImageName);
 		if(pImage)
 		{
-			Graphics()->TextureSet(Ui()->HotItem() == pButtonContainer ? pImage->m_OrgTexture : pImage->m_GreyTexture);
+			Graphics()->TextureSet((AlwaysColoredImage || Ui()->HotItem() == pButtonContainer) ? pImage->m_OrgTexture : pImage->m_GreyTexture);
 			Graphics()->WrapClamp();
 			Graphics()->QuadsBegin();
 			Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -155,7 +171,7 @@ int CMenus::DoButton_Menu(CButtonContainer *pButtonContainer, const char *pText,
 	Text.HMargin((Text.h * FontFactor) / 2.0f, &Text);
 	Ui()->DoLabel(&Text, pText, Text.h * CUi::ms_FontmodHeight, TEXTALIGN_MC);
 
-	return Ui()->DoButtonLogic(pButtonContainer, Checked, pRect, Flags);
+	return Ui()->DoButtonLogic(pButtonContainer, Checked, pRect, Flags, CUi::EButtonSoundType::BUTTON);
 }
 
 int CMenus::DoButton_MenuTab(CButtonContainer *pButtonContainer, const char *pText, int Checked, const CUIRect *pRect, int Corners, SUIAnimator *pAnimator, const ColorRGBA *pDefaultColor, const ColorRGBA *pActiveColor, const ColorRGBA *pHoverColor, float EdgeRounding, const CCommunityIcon *pCommunityIcon)
@@ -244,7 +260,7 @@ int CMenus::DoButton_MenuTab(CButtonContainer *pButtonContainer, const char *pTe
 		Ui()->DoLabel(&Label, pText, Label.h * CUi::ms_FontmodHeight, TEXTALIGN_MC);
 	}
 
-	return Ui()->DoButtonLogic(pButtonContainer, Checked, pRect, BUTTONFLAG_LEFT);
+	return Ui()->DoButtonLogic(pButtonContainer, Checked, pRect, BUTTONFLAG_LEFT, CUi::EButtonSoundType::TAB_SELECT);
 }
 
 int CMenus::DoButton_GridHeader(const void *pId, const char *pText, int Checked, const CUIRect *pRect, int Align)
@@ -257,7 +273,7 @@ int CMenus::DoButton_GridHeader(const void *pId, const char *pText, int Checked,
 	CUIRect Temp;
 	pRect->VMargin(5.0f, &Temp);
 	Ui()->DoLabel(&Temp, pText, pRect->h * CUi::ms_FontmodHeight, Align);
-	return Ui()->DoButtonLogic(pId, Checked, pRect, BUTTONFLAG_LEFT);
+	return Ui()->DoButtonLogic(pId, Checked, pRect, BUTTONFLAG_LEFT, CUi::EButtonSoundType::BUTTON);
 }
 
 int CMenus::DoButton_Favorite(const void *pButtonId, const void *pParentId, bool Checked, const CUIRect *pRect)
@@ -275,7 +291,7 @@ int CMenus::DoButton_Favorite(const void *pButtonId, const void *pParentId, bool
 		TextRender()->SetRenderFlags(0);
 		TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
 	}
-	return Ui()->DoButtonLogic(pButtonId, 0, pRect, BUTTONFLAG_LEFT);
+	return Ui()->DoButtonLogic(pButtonId, 0, pRect, BUTTONFLAG_LEFT, CUi::EButtonSoundType::TOOLBAR);
 }
 
 int CMenus::DoButton_CheckBox_Common(const void *pId, const char *pText, const char *pBoxText, const CUIRect *pRect, const unsigned Flags)
@@ -301,7 +317,8 @@ int CMenus::DoButton_CheckBox_Common(const void *pId, const char *pText, const c
 	TextRender()->SetRenderFlags(0);
 	Ui()->DoLabel(&Label, pText, Box.h * CUi::ms_FontmodHeight, TEXTALIGN_ML);
 
-	return Ui()->DoButtonLogic(pId, 0, pRect, Flags);
+	const bool IsBinaryCheckBox = *pBoxText == '\0' || Checkable;
+	return Ui()->DoButtonLogic(pId, Checkable ? 1 : 0, pRect, Flags, IsBinaryCheckBox ? CUi::EButtonSoundType::CHECKBOX : CUi::EButtonSoundType::DEFAULT);
 }
 
 void CMenus::DoLaserPreview(const CUIRect *pRect, const ColorHSLA LaserOutlineColor, const ColorHSLA LaserInnerColor, const int LaserType)
@@ -316,6 +333,19 @@ void CMenus::DoLaserPreview(const CUIRect *pRect, const ColorHSLA LaserOutlineCo
 
 	// TicksBody = 4.0 for less laser width for weapon alignment
 	GameClient()->m_Items.RenderLaser(From, Pos, OuterColor, InnerColor, 4.0f, TicksHead, LaserType);
+
+	// Invisible clickable area over the laser endpoint dot (rifle only = first preview)
+	if(LaserType == LASERTYPE_RIFLE)
+	{
+		const float HitSize = 20.0f;
+		CUIRect HitRect;
+		HitRect.x = Pos.x - HitSize / 2.0f;
+		HitRect.y = Pos.y - HitSize / 2.0f;
+		HitRect.w = HitSize;
+		HitRect.h = HitSize;
+		if(Ui()->MouseHovered(&HitRect) && Ui()->MouseButtonClicked(0))
+			m_LaserDotSecretClicked = true;
+	}
 
 	switch(LaserType)
 	{
@@ -448,7 +478,7 @@ ColorHSLA CMenus::DoButton_ColorPicker(const CUIRect *pRect, unsigned int *pHsla
 	pRect->Draw(Outline, IGraphics::CORNER_ALL, 4.0f);
 	Rect.Draw(color_cast<ColorRGBA>(HslaColor), IGraphics::CORNER_ALL, 4.0f);
 
-	if(Ui()->DoButtonLogic(pHslaColor, 0, pRect, BUTTONFLAG_LEFT))
+	if(Ui()->DoButtonLogic(pHslaColor, 0, pRect, BUTTONFLAG_LEFT, CUi::EButtonSoundType::TOOLBAR))
 	{
 		m_ColorPickerPopupContext.m_pHslaColor = pHslaColor;
 		m_ColorPickerPopupContext.m_HslaColor = HslaColor;
@@ -525,7 +555,7 @@ void CMenus::RenderMenubar(CUIRect Box, IClient::EClientState ClientState)
 		}
 		else
 		{
-			Client()->Quit();
+			QuitWithMenuSfx();
 		}
 	}
 	GameClient()->m_Tooltips.DoToolTip(&s_QuitButton, &Button, Localize("Quit"));
@@ -558,6 +588,8 @@ void CMenus::RenderMenubar(CUIRect Box, IClient::EClientState ClientState)
 			NewPage = PAGE_DEMOS;
 		}
 		GameClient()->m_Tooltips.DoToolTip(&s_DemoButton, &Button, Localize("Demos"));
+		Box.VSplitRight(10.0f, &Box, nullptr);
+
 		Box.VSplitRight(10.0f, &Box, nullptr);
 
 		Box.VSplitLeft(33.0f, &Button, &Box);
@@ -725,6 +757,8 @@ void CMenus::RenderMenubar(CUIRect Box, IClient::EClientState ClientState)
 			GameClient()->m_Tooltips.DoToolTip(&s_DemoButton, &Button, Localize("Demos"));
 			Box.VSplitRight(10.0f, &Box, nullptr);
 
+			Box.VSplitRight(10.0f, &Box, nullptr);
+
 			TextRender()->SetRenderFlags(0);
 			TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
 		}
@@ -758,43 +792,108 @@ void CMenus::RenderLoading(const char *pCaption, const char *pContent, int Incre
 
 	Ui()->MapScreen();
 
-	if(GameClient()->m_MenuBackground.IsLoading())
-	{
-		// Avoid rendering while loading the menu background as this would otherwise
-		// cause the regular menu background to be rendered for a few frames while
-		// the menu background is not loaded yet.
-		return;
-	}
-	if(!GameClient()->m_MenuBackground.Render())
-	{
-		RenderBackground();
-	}
-
 	m_LoadingState.m_LastRender = Now;
 
-	CUIRect Box;
-	Ui()->Screen()->Margin(160.0f, &Box);
-
-	Graphics()->BlendNormal();
-	Graphics()->TextureClear();
-	Box.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.5f), IGraphics::CORNER_ALL, 15.0f);
-	Box.Margin(20.0f, &Box);
-
-	CUIRect Label;
-	Box.HSplitTop(24.0f, &Label, &Box);
-	Ui()->DoLabel(&Label, pCaption, 24.0f, TEXTALIGN_MC);
-
-	Box.HSplitTop(20.0f, nullptr, &Box);
-	Box.HSplitTop(24.0f, &Label, &Box);
-	Ui()->DoLabel(&Label, pContent, 20.0f, TEXTALIGN_MC);
-
-	if(m_LoadingState.m_Total > 0)
+	const bool IsServerJoinLoading = Client()->State() == IClient::STATE_CONNECTING || Client()->State() == IClient::STATE_LOADING;
+	CUIRect FullScreen = *Ui()->Screen();
+	if(IsServerJoinLoading)
 	{
-		CUIRect ProgressBar;
-		Box.HSplitBottom(30.0f, &Box, nullptr);
-		Box.HSplitBottom(25.0f, &Box, &ProgressBar);
-		ProgressBar.VMargin(20.0f, &ProgressBar);
-		Ui()->RenderProgressBar(ProgressBar, CurLoadRenderCount / (float)m_LoadingState.m_Total);
+		const float BackgroundColor = 21.0f / 255.0f;
+		FullScreen.Draw(ColorRGBA(BackgroundColor, BackgroundColor, BackgroundColor, 1.0f), IGraphics::CORNER_ALL, 0.0f);
+
+		const IGraphics::CTextureHandle &LogoTexture = MainMenuLogoTexture();
+		Graphics()->TextureSet(LogoTexture.IsValid() && !LogoTexture.IsNullTexture() ? LogoTexture : g_pData->m_aImages[IMAGE_BANNER].m_Id);
+		Graphics()->QuadsBegin();
+		Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+		const float LogoWidth = minimum(420.0f, maximum(220.0f, FullScreen.w * 0.38f));
+		const float LogoHeight = LogoWidth / (360.0f / 103.0f);
+		const float LogoY = FullScreen.y + minimum(70.0f, FullScreen.h * 0.12f);
+		IGraphics::CQuadItem LogoQuad(FullScreen.x + (FullScreen.w - LogoWidth) / 2.0f, LogoY, LogoWidth, LogoHeight);
+		Graphics()->QuadsDrawTL(&LogoQuad, 1);
+		Graphics()->QuadsEnd();
+
+		const bool HasContent = pContent != nullptr && pContent[0] != '\0';
+		const bool HasProgressBar = m_LoadingState.m_Total > 0;
+		const float LabelWidth = minimum(860.0f, FullScreen.w - 80.0f);
+		const float TitleHeight = 24.0f;
+		const float TextHeight = 24.0f;
+		const float TextSpacing = 8.0f;
+		const float ProgressSpacing = 16.0f;
+		const float ProgressHeight = 24.0f;
+
+		float ContentHeight = TitleHeight;
+		if(HasContent)
+			ContentHeight += TextSpacing + TextHeight;
+		if(HasProgressBar)
+			ContentHeight += ProgressSpacing + ProgressHeight;
+
+		CUIRect Label;
+		Label.x = FullScreen.x + (FullScreen.w - LabelWidth) / 2.0f;
+		Label.y = FullScreen.y + FullScreen.h * 0.5f - ContentHeight / 2.0f;
+		Label.w = LabelWidth;
+		Label.h = TitleHeight;
+
+		SLabelProperties TitleProps;
+		TitleProps.m_MaxWidth = Label.w;
+		TitleProps.m_EllipsisAtEnd = true;
+		Ui()->DoLabel(&Label, pCaption, 24.0f, TEXTALIGN_MC, TitleProps);
+
+		if(HasContent)
+		{
+			Label.y += TitleHeight + TextSpacing;
+			Label.h = TextHeight;
+			Ui()->DoLabel(&Label, pContent, 20.0f, TEXTALIGN_MC);
+		}
+
+		if(HasProgressBar)
+		{
+			CUIRect ProgressBar;
+			ProgressBar.x = Label.x;
+			ProgressBar.w = Label.w;
+			ProgressBar.h = ProgressHeight;
+			ProgressBar.y = (HasContent ? Label.y + TextHeight : Label.y + TitleHeight) + ProgressSpacing;
+			Ui()->RenderProgressBar(ProgressBar, CurLoadRenderCount / (float)m_LoadingState.m_Total);
+		}
+
+		CUIRect Button;
+		Button.w = FullScreen.w - 16.0f;
+		Button.h = 36.0f;
+		Button.x = FullScreen.x + 8.0f;
+		Button.y = FullScreen.y + FullScreen.h - Button.h - 8.0f;
+
+		static CButtonContainer s_Button;
+		if(DoButton_Menu(&s_Button, Localize("Cancel"), 0, &Button) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+		{
+			Client()->Disconnect();
+			Ui()->SetActiveItem(nullptr);
+			RefreshBrowserTab(true);
+		}
+	}
+	else
+	{
+		FullScreen.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 1.0f), IGraphics::CORNER_ALL, 0.0f);
+
+		CUIRect Label;
+		Label.x = FullScreen.x + 10.0f;
+		Label.w = FullScreen.w - 20.0f;
+		Label.h = 14.0f;
+		Label.y = FullScreen.y + FullScreen.h - Label.h - 8.0f;
+
+		char aStatus[256];
+		if(pContent != nullptr && pContent[0] != '\0')
+			str_format(aStatus, sizeof(aStatus), "%s: %s", pCaption, pContent);
+		else
+			str_copy(aStatus, pCaption);
+
+		SLabelProperties TextProps;
+		TextProps.m_MaxWidth = Label.w;
+		TextProps.m_EllipsisAtEnd = true;
+		Ui()->DoLabel(&Label, aStatus, 12.0f, TEXTALIGN_ML, TextProps);
+
+		if(Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+		{
+			QuitWithMenuSfx();
+		}
 	}
 
 	Graphics()->SetColor(1.0, 1.0, 1.0, 1.0);
@@ -806,6 +905,11 @@ void CMenus::FinishLoading()
 {
 	m_LoadingState.m_Current = 0;
 	m_LoadingState.m_Total = 0;
+	if(!m_MenuSfxOpenPlayed)
+	{
+		PlayMenuSfxSample(EMenuSfxSample::MENU_OPEN);
+		m_MenuSfxOpenPlayed = true;
+	}
 }
 
 void CMenus::RenderNews(CUIRect MainView)
@@ -849,8 +953,17 @@ void CMenus::OnInterfacesInit(CGameClient *pClient)
 	m_CommunityIcons.OnInterfacesInit(pClient);
 }
 
+void CMenus::OnConsoleInit()
+{
+	ConfigManager()->RegisterCallback(CMenus::ConfigSaveCallback, this, ConfigDomain::BESTCLIENT);
+	Console()->Register("add_favorite_asset", "s[tab] s[asset_name]", CFGFLAG_CLIENT, ConAddFavoriteAsset, this, "Add an asset item as a favorite");
+	Console()->Register("remove_favorite_asset", "s[tab] s[asset_name]", CFGFLAG_CLIENT, ConRemoveFavoriteAsset, this, "Remove an asset item from the favorites");
+}
+
 void CMenus::OnInit()
 {
+	g_Config.m_UiPage = NormalizeMenuPage(g_Config.m_UiPage);
+
 	if(g_Config.m_ClShowWelcome)
 	{
 		m_Popup = POPUP_LANGUAGE;
@@ -897,11 +1010,18 @@ void CMenus::OnInit()
 	Console()->Chain("cl_asset_particles", ConchainAssetParticles, this);
 	Console()->Chain("cl_asset_hud", ConchainAssetHud, this);
 	Console()->Chain("cl_asset_extras", ConchainAssetExtras, this);
+	Console()->Chain("cl_asset_cursor", ConchainAssetCursor, this);
+	Console()->Chain("cl_asset_arrow", ConchainAssetArrow, this);
+	Console()->Chain("snd_pack", ConchainSndPack, this);
 
 	Console()->Chain("demo_play", ConchainDemoPlay, this);
 	Console()->Chain("demo_speed", ConchainDemoSpeed, this);
 
 	m_TextureBlob = Graphics()->LoadTexture("blob.png", IStorage::TYPE_ALL);
+	m_MenuMediaBackground.Init(Graphics(), Storage());
+	m_MainMenuLogoTexture = Graphics()->LoadTexture("bestclient/gui_logo.png", IStorage::TYPE_ALL);
+	if(!m_MainMenuLogoTexture.IsValid() || m_MainMenuLogoTexture.IsNullTexture())
+		m_MainMenuLogoTexture = Graphics()->LoadTexture("BestClient/gui_logo.png", IStorage::TYPE_ALL);
 
 	// setup load amount
 	m_LoadingState.m_Current = 0;
@@ -921,6 +1041,12 @@ void CMenus::OnInit()
 	m_DirectionQuadContainerIndex = Graphics()->CreateQuadContainer(false);
 	Graphics()->QuadContainerAddSprite(m_DirectionQuadContainerIndex, 0.f, 0.f, 22.f);
 	Graphics()->QuadContainerUpload(m_DirectionQuadContainerIndex);
+
+	LoadMenuSfx();
+	m_MenuSfxOpenPlayed = false;
+	m_MenuSfxExitPlayed = false;
+	m_MenuSfxQuitPending = false;
+	m_MenuSfxQuitAt = 0;
 }
 
 void CMenus::ConchainBackgroundEntities(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData)
@@ -949,6 +1075,310 @@ void CMenus::UpdateMusicState()
 		GameClient()->m_Sounds.Enqueue(CSounds::CHN_MUSIC, SOUND_MENU);
 	else if(!ShouldPlay && GameClient()->m_Sounds.IsPlaying(SOUND_MENU))
 		GameClient()->m_Sounds.Stop(SOUND_MENU);
+}
+
+void CMenus::LoadMenuSfx()
+{
+	if(m_MenuSfxLoaded)
+		return;
+
+	static constexpr std::array<const char *, (size_t)EMenuSfxSample::COUNT> s_apSampleNames = {
+		"bss-complete",
+		"bss-progress",
+		"bss-stage-0",
+		"bss-stage-1",
+		"bss-stage-2",
+		"bss-stage-3",
+		"button-hover",
+		"button-select",
+		"button-sidebar-hover",
+		"button-sidebar-select",
+		"check-off",
+		"check-on",
+		"cursor-tap",
+		"default-hover",
+		"default-select-disabled",
+		"default-select",
+		"dialog-cancel-select",
+		"dialog-dangerous-select",
+		"dialog-dangerous-tick",
+		"dialog-ok-select",
+		"dialog-pop-in",
+		"dialog-pop-out",
+		"dropdown-close",
+		"dropdown-open",
+		"generic-error",
+		"item-swap",
+		"menu-close",
+		"menu-open-select",
+		"menu-open",
+		"menu-sub-open",
+		"metronome-latch",
+		"metronome-tick-downbeat",
+		"metronome-tick",
+		"noclick-hover",
+		"noclick-select",
+		"notch-tick",
+		"notification-cancel",
+		"notification-default",
+		"notification-done",
+		"notification-error",
+		"notification-friend-offline",
+		"notification-friend-online",
+		"notification-mention",
+		"osd-change",
+		"osd-off",
+		"osd-on",
+		"overlay-big-pop-in",
+		"overlay-big-pop-out",
+		"overlay-pop-in",
+		"overlay-pop-out",
+		"ruleset-select-fruits",
+		"ruleset-select-mania",
+		"ruleset-select-osu",
+		"ruleset-select-taiko",
+		"screen-back",
+		"scroll-to-previous",
+		"scroll-to-top",
+		"settings-pop-in",
+		"shutter",
+		"submit-select",
+		"tabselect-select",
+		"toolbar-hover",
+		"toolbar-select",
+		"wave-pop-in",
+		"wave-pop-out",
+	};
+
+	for(size_t i = 0; i < s_apSampleNames.size(); ++i)
+	{
+		char aPath[IO_MAX_PATH_LENGTH];
+		str_format(aPath, sizeof(aPath), "audio/osu/ui/%s.wv", s_apSampleNames[i]);
+		m_aMenuSfxSamples[i] = Sound()->LoadWV(aPath);
+	}
+	m_MenuSfxLastHoverTick = 0;
+	m_MenuSfxLastClickTick = 0;
+	m_MenuSfxLastScrollTick = 0;
+	m_MenuSfxLastSliderTick = 0;
+	m_MenuSfxLastPopupTick = 0;
+	m_MenuSfxLoaded = true;
+}
+
+void CMenus::UnloadMenuSfx()
+{
+	if(!m_MenuSfxLoaded)
+		return;
+
+	for(const int SampleId : m_aMenuSfxSamples)
+	{
+		if(SampleId >= 0)
+			Sound()->UnloadSample(SampleId);
+	}
+
+	m_aMenuSfxSamples.fill(-1);
+	m_MenuSfxLastHoverTick = 0;
+	m_MenuSfxLastClickTick = 0;
+	m_MenuSfxLastScrollTick = 0;
+	m_MenuSfxLastSliderTick = 0;
+	m_MenuSfxLastPopupTick = 0;
+	m_MenuSfxLoaded = false;
+}
+
+void CMenus::PlayMenuSfxSample(int SampleId, float Pitch)
+{
+	if(SampleId < 0 || !g_Config.m_SndEnable || !g_Config.m_BcMenuSfx)
+		return;
+
+	const float Volume = std::clamp(g_Config.m_BcMenuSfxVolume / 100.0f, 0.0f, 1.0f);
+	if(Volume <= 0.0f)
+		return;
+
+	const ISound::CVoiceHandle Voice = Sound()->Play(CSounds::CHN_GUI, SampleId, 0, Volume);
+	if(Voice.IsValid())
+		Sound()->SetVoicePitch(Voice, Pitch);
+}
+
+void CMenus::PlayMenuSfxSample(EMenuSfxSample Sample, float Pitch)
+{
+	if(!m_MenuSfxLoaded)
+		LoadMenuSfx();
+
+	PlayMenuSfxSample(m_aMenuSfxSamples[(size_t)Sample], Pitch);
+}
+
+void CMenus::PlayIngameMenuOpenSfx()
+{
+	PlayMenuSfxSample(EMenuSfxSample::MENU_OPEN);
+	PlayMenuSfxSample(EMenuSfxSample::MENU_SUB_OPEN);
+}
+
+void CMenus::PlayIngameMenuCloseSfx()
+{
+	PlayMenuSfxSample(EMenuSfxSample::MENU_CLOSE);
+	PlayMenuSfxSample(EMenuSfxSample::MENU_SUB_OPEN);
+}
+
+CMenus::EMenuSfxSample CMenus::MenuSfxHoverSample(CUi::EButtonSoundType SoundType) const
+{
+	switch(SoundType)
+	{
+	case CUi::EButtonSoundType::BUTTON:
+		return EMenuSfxSample::BUTTON_HOVER;
+	case CUi::EButtonSoundType::BUTTON_SIDEBAR:
+		return EMenuSfxSample::BUTTON_SIDEBAR_HOVER;
+	case CUi::EButtonSoundType::TOOLBAR:
+		return EMenuSfxSample::TOOLBAR_HOVER;
+	case CUi::EButtonSoundType::SILENT:
+		return EMenuSfxSample::NOCLICK_HOVER;
+	case CUi::EButtonSoundType::DEFAULT:
+	case CUi::EButtonSoundType::TAB_SELECT:
+	case CUi::EButtonSoundType::CHECKBOX:
+	case CUi::EButtonSoundType::DROPDOWN:
+	case CUi::EButtonSoundType::DIALOG_OK:
+	case CUi::EButtonSoundType::DIALOG_CANCEL:
+	case CUi::EButtonSoundType::DIALOG_DANGEROUS:
+	case CUi::EButtonSoundType::MENU_OPEN:
+		return EMenuSfxSample::DEFAULT_HOVER;
+	}
+	dbg_assert(false, "invalid UI button sound type");
+	return EMenuSfxSample::DEFAULT_HOVER;
+}
+
+CMenus::EMenuSfxSample CMenus::MenuSfxEventSample(CUi::EUiSoundEvent Event, CUi::EButtonSoundType SoundType, bool Enabled, int Checked) const
+{
+	if(Event == CUi::EUiSoundEvent::HOVER)
+		return MenuSfxHoverSample(SoundType);
+	if(Event == CUi::EUiSoundEvent::DISABLED_CLICK || !Enabled)
+		return EMenuSfxSample::DEFAULT_SELECT_DISABLED;
+
+	switch(Event)
+	{
+	case CUi::EUiSoundEvent::CHECK_ON:
+		return EMenuSfxSample::CHECK_ON;
+	case CUi::EUiSoundEvent::CHECK_OFF:
+		return EMenuSfxSample::CHECK_OFF;
+	case CUi::EUiSoundEvent::DROPDOWN_OPEN:
+		return EMenuSfxSample::DROPDOWN_OPEN;
+	case CUi::EUiSoundEvent::DROPDOWN_CLOSE:
+		return EMenuSfxSample::DROPDOWN_CLOSE;
+	case CUi::EUiSoundEvent::POPUP_OPEN:
+		return SoundType == CUi::EButtonSoundType::DIALOG_OK || SoundType == CUi::EButtonSoundType::DIALOG_CANCEL || SoundType == CUi::EButtonSoundType::DIALOG_DANGEROUS ? EMenuSfxSample::DIALOG_POP_IN : EMenuSfxSample::OVERLAY_POP_IN;
+	case CUi::EUiSoundEvent::POPUP_CLOSE:
+		return SoundType == CUi::EButtonSoundType::DIALOG_OK || SoundType == CUi::EButtonSoundType::DIALOG_CANCEL || SoundType == CUi::EButtonSoundType::DIALOG_DANGEROUS ? EMenuSfxSample::DIALOG_POP_OUT : EMenuSfxSample::OVERLAY_POP_OUT;
+	case CUi::EUiSoundEvent::SCROLL_TICK:
+	case CUi::EUiSoundEvent::SCROLL_TO_PREVIOUS:
+		return EMenuSfxSample::SCROLL_TO_PREVIOUS;
+	case CUi::EUiSoundEvent::SCROLL_TO_TOP:
+		return EMenuSfxSample::SCROLL_TO_TOP;
+	case CUi::EUiSoundEvent::SLIDER_TICK:
+		return EMenuSfxSample::NOTCH_TICK;
+	case CUi::EUiSoundEvent::VALUE_CHANGE:
+		return EMenuSfxSample::OSD_CHANGE;
+	case CUi::EUiSoundEvent::ITEM_SWAP:
+		return EMenuSfxSample::ITEM_SWAP;
+	case CUi::EUiSoundEvent::ERROR:
+		return EMenuSfxSample::GENERIC_ERROR;
+	case CUi::EUiSoundEvent::SUBMIT:
+		return EMenuSfxSample::SUBMIT_SELECT;
+	case CUi::EUiSoundEvent::CLICK:
+	case CUi::EUiSoundEvent::HOVER:
+	case CUi::EUiSoundEvent::DISABLED_CLICK:
+		break;
+	}
+
+	switch(SoundType)
+	{
+	case CUi::EButtonSoundType::BUTTON:
+		return EMenuSfxSample::BUTTON_SELECT;
+	case CUi::EButtonSoundType::BUTTON_SIDEBAR:
+		return EMenuSfxSample::BUTTON_SIDEBAR_SELECT;
+	case CUi::EButtonSoundType::TAB_SELECT:
+		return EMenuSfxSample::TABSELECT_SELECT;
+	case CUi::EButtonSoundType::TOOLBAR:
+		return EMenuSfxSample::TOOLBAR_SELECT;
+	case CUi::EButtonSoundType::CHECKBOX:
+		return Checked ? EMenuSfxSample::CHECK_OFF : EMenuSfxSample::CHECK_ON;
+	case CUi::EButtonSoundType::DROPDOWN:
+		return EMenuSfxSample::DROPDOWN_OPEN;
+	case CUi::EButtonSoundType::DIALOG_OK:
+		return EMenuSfxSample::DIALOG_OK_SELECT;
+	case CUi::EButtonSoundType::DIALOG_CANCEL:
+		return EMenuSfxSample::DIALOG_CANCEL_SELECT;
+	case CUi::EButtonSoundType::DIALOG_DANGEROUS:
+		return EMenuSfxSample::DIALOG_DANGEROUS_SELECT;
+	case CUi::EButtonSoundType::MENU_OPEN:
+		return EMenuSfxSample::MENU_OPEN_SELECT;
+	case CUi::EButtonSoundType::SILENT:
+		return EMenuSfxSample::NOCLICK_SELECT;
+	case CUi::EButtonSoundType::DEFAULT:
+		return EMenuSfxSample::DEFAULT_SELECT;
+	}
+	dbg_assert(false, "invalid UI button sound type");
+	return EMenuSfxSample::DEFAULT_SELECT;
+}
+
+void CMenus::OnUiSoundEvent(CUi::EUiSoundEvent Event, CUi::EButtonSoundType SoundType, bool Enabled, int Checked, float Pitch)
+{
+	if(!m_MenuSfxLoaded)
+		LoadMenuSfx();
+
+	const int64_t Now = time_get();
+	const int64_t HoverCooldown = time_freq() / 20; // 50 ms
+	const int64_t ClickCooldown = time_freq() / 25; // 40 ms
+	const int64_t SliderCooldown = time_freq() / 16; // ~63 ms
+	const int64_t ScrollCooldown = time_freq() / 12; // ~83 ms
+	const int64_t PopupCooldown = time_freq() / 33; // ~30 ms
+
+	switch(Event)
+	{
+	case CUi::EUiSoundEvent::HOVER:
+		if(Now - m_MenuSfxLastHoverTick >= HoverCooldown)
+		{
+			PlayMenuSfxSample(MenuSfxEventSample(Event, SoundType, Enabled, Checked));
+			m_MenuSfxLastHoverTick = Now;
+		}
+		break;
+	case CUi::EUiSoundEvent::SCROLL_TICK:
+	case CUi::EUiSoundEvent::SCROLL_TO_TOP:
+	case CUi::EUiSoundEvent::SCROLL_TO_PREVIOUS:
+		if(Now - m_MenuSfxLastScrollTick >= ScrollCooldown)
+		{
+			PlayMenuSfxSample(MenuSfxEventSample(Event, SoundType, Enabled, Checked));
+			m_MenuSfxLastScrollTick = Now;
+		}
+		break;
+	case CUi::EUiSoundEvent::SLIDER_TICK:
+	case CUi::EUiSoundEvent::VALUE_CHANGE:
+		if(Now - m_MenuSfxLastSliderTick >= SliderCooldown)
+		{
+			PlayMenuSfxSample(MenuSfxEventSample(Event, SoundType, Enabled, Checked), Pitch);
+			m_MenuSfxLastSliderTick = Now;
+		}
+		break;
+	case CUi::EUiSoundEvent::POPUP_OPEN:
+	case CUi::EUiSoundEvent::POPUP_CLOSE:
+		if(Now - m_MenuSfxLastPopupTick >= PopupCooldown)
+		{
+			PlayMenuSfxSample(MenuSfxEventSample(Event, SoundType, Enabled, Checked));
+			m_MenuSfxLastPopupTick = Now;
+		}
+		break;
+	case CUi::EUiSoundEvent::CLICK:
+	case CUi::EUiSoundEvent::DISABLED_CLICK:
+	case CUi::EUiSoundEvent::CHECK_ON:
+	case CUi::EUiSoundEvent::CHECK_OFF:
+	case CUi::EUiSoundEvent::DROPDOWN_OPEN:
+	case CUi::EUiSoundEvent::DROPDOWN_CLOSE:
+	case CUi::EUiSoundEvent::ITEM_SWAP:
+	case CUi::EUiSoundEvent::ERROR:
+	case CUi::EUiSoundEvent::SUBMIT:
+		if(Now - m_MenuSfxLastClickTick >= ClickCooldown)
+		{
+			PlayMenuSfxSample(MenuSfxEventSample(Event, SoundType, Enabled, Checked));
+			m_MenuSfxLastClickTick = Now;
+		}
+		break;
+	}
 }
 
 void CMenus::PopupMessage(const char *pTitle, const char *pMessage, const char *pButtonLabel, int NextPopup, FPopupButtonCallback pfnButtonCallback)
@@ -1053,6 +1483,24 @@ void CMenus::Render()
 		}
 		m_JoinTutorial.m_Queued = false;
 	}
+	const bool BrowserPageActive = m_MenuPage >= PAGE_INTERNET && m_MenuPage <= PAGE_FAVORITE_COMMUNITY_5;
+	if(BrowserPageActive && g_Config.m_BcAutoServerListRefresh)
+	{
+		const bool BrowserBusy = ServerBrowser()->IsRefreshing() || ServerBrowser()->IsGettingServerlist();
+		if(!BrowserBusy)
+		{
+			const int64_t Now = time_get();
+			const int64_t RefreshInterval = (int64_t)g_Config.m_BcAutoServerListRefreshSeconds * time_freq();
+			if(m_LastServerBrowserRefreshTick == 0)
+				m_LastServerBrowserRefreshTick = Now;
+			else if(RefreshInterval > 0 && Now - m_LastServerBrowserRefreshTick >= RefreshInterval)
+				RefreshBrowserTab(true);
+		}
+	}
+	else if(!BrowserPageActive)
+	{
+		m_LastServerBrowserRefreshTick = 0;
+	}
 
 	// Determine the client state once before rendering because it can change
 	// while rendering which causes frames with broken user interface.
@@ -1060,13 +1508,19 @@ void CMenus::Render()
 
 	if(ClientState == IClient::STATE_ONLINE || ClientState == IClient::STATE_DEMOPLAYBACK)
 	{
+		m_MenuMediaBackground.Unload();
 		ms_ColorTabbarInactive = ms_ColorTabbarInactiveIngame;
 		ms_ColorTabbarActive = ms_ColorTabbarActiveIngame;
 		ms_ColorTabbarHover = ms_ColorTabbarHoverIngame;
 	}
 	else
 	{
-		if(!GameClient()->m_MenuBackground.Render())
+		const float ScreenHeight = 300.0f;
+		const float ScreenWidth = ScreenHeight * Graphics()->ScreenAspect();
+		const bool MenuMediaBackgroundDisabled = GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_VISUALS_MEDIA_BACKGROUND);
+		m_MenuMediaBackground.SyncFromConfig(MenuMediaBackgroundDisabled ? 0 : g_Config.m_BcMenuMediaBackground, g_Config.m_BcMenuMediaBackgroundPath);
+		m_MenuMediaBackground.Update();
+		if((MenuMediaBackgroundDisabled || !m_MenuMediaBackground.Render(ScreenWidth, ScreenHeight)) && !GameClient()->m_MenuBackground.Render())
 		{
 			RenderBackground();
 		}
@@ -1076,6 +1530,13 @@ void CMenus::Render()
 	}
 
 	CUIRect Screen = *Ui()->Screen();
+	if(IsActive() && (ClientState == IClient::STATE_ONLINE || ClientState == IClient::STATE_DEMOPLAYBACK))
+	{
+		const bool IngameMenuAnimationEnabled = BCUiAnimations::Enabled() && g_Config.m_BcIngameMenuAnimation != 0 && g_Config.m_BcIngameMenuAnimationMs > 0;
+		const float Ease = IngameMenuAnimationEnabled ? BCUiAnimations::EaseInOutQuad(m_BcIngameMenuOpenPhase) : 1.0f;
+		const float Slide = (1.0f - Ease) * 60.0f;
+		Screen.y -= Slide;
+	}
 	if(Client()->State() != IClient::STATE_DEMOPLAYBACK || m_Popup != POPUP_NONE)
 	{
 		Screen.Margin(10.0f, &Screen);
@@ -1107,8 +1568,17 @@ void CMenus::Render()
 		}
 		else
 		{
+			const bool FullscreenBestClientEditor =
+				m_MenuPage == PAGE_SETTINGS &&
+				g_Config.m_UiSettingsPage == SETTINGS_BESTCLIENT &&
+				((m_AssetsEditorState.m_VisualsEditorOpen && m_AssetsEditorState.m_FullscreenOpen) ||
+					(m_ComponentsEditorState.m_Open && m_ComponentsEditorState.m_FullscreenOpen));
+
 			CUIRect TabBar, MainView;
-			Screen.HSplitTop(24.0f, &TabBar, &MainView);
+			if(FullscreenBestClientEditor)
+				MainView = Screen;
+			else
+				Screen.HSplitTop(24.0f, &TabBar, &MainView);
 
 			if(m_MenuPage == PAGE_NEWS)
 			{
@@ -1131,7 +1601,8 @@ void CMenus::Render()
 				dbg_assert_failed("Invalid m_MenuPage: %d", m_MenuPage);
 			}
 
-			RenderMenubar(TabBar, ClientState);
+			if(!FullscreenBestClientEditor)
+				RenderMenubar(TabBar, ClientState);
 		}
 		break;
 
@@ -1142,8 +1613,17 @@ void CMenus::Render()
 		}
 		else
 		{
+			const bool FullscreenBestClientEditor =
+				m_GamePage == PAGE_SETTINGS &&
+				g_Config.m_UiSettingsPage == SETTINGS_BESTCLIENT &&
+				((m_AssetsEditorState.m_VisualsEditorOpen && m_AssetsEditorState.m_FullscreenOpen) ||
+					(m_ComponentsEditorState.m_Open && m_ComponentsEditorState.m_FullscreenOpen));
+
 			CUIRect TabBar, MainView;
-			Screen.HSplitTop(24.0f, &TabBar, &MainView);
+			if(FullscreenBestClientEditor)
+				MainView = Screen;
+			else
+				Screen.HSplitTop(24.0f, &TabBar, &MainView);
 
 			if(m_GamePage == PAGE_GAME)
 			{
@@ -1183,7 +1663,8 @@ void CMenus::Render()
 				dbg_assert_failed("Invalid m_GamePage: %d", m_GamePage);
 			}
 
-			RenderMenubar(TabBar, ClientState);
+			if(!FullscreenBestClientEditor)
+				RenderMenubar(TabBar, ClientState);
 		}
 		break;
 
@@ -1436,7 +1917,7 @@ void CMenus::RenderPopupFullscreen(CUIRect Screen)
 			else
 			{
 				m_Popup = POPUP_NONE;
-				Client()->Quit();
+				QuitWithMenuSfx();
 			}
 		}
 	}
@@ -1503,7 +1984,7 @@ void CMenus::RenderPopupFullscreen(CUIRect Screen)
 				static char s_CommunityTooltipButtonId;
 				Name.VSplitLeft(2.5f * Name.h, &Icon, &Name);
 				m_CommunityIcons.Render(pIcon, Icon, true);
-				Ui()->DoButtonLogic(&s_CommunityTooltipButtonId, 0, &Icon, BUTTONFLAG_NONE);
+				Ui()->DoButtonLogic(&s_CommunityTooltipButtonId, 0, &Icon, BUTTONFLAG_NONE, CUi::EButtonSoundType::SILENT);
 				GameClient()->m_Tooltips.DoToolTip(&s_CommunityTooltipButtonId, &Icon, pCommunity->Name());
 			}
 
@@ -2110,18 +2591,34 @@ void CMenus::RenderPopupFullscreen(CUIRect Screen)
 
 void CMenus::RenderPopupConnecting(CUIRect Screen)
 {
+	(void)Screen;
 	const float FontSize = 20.0f;
+	const float BackgroundColor = 21.0f / 255.0f;
 
-	CUIRect Box, Label;
-	Screen.Margin(150.0f, &Box);
-	Box.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.5f), IGraphics::CORNER_ALL, 15.0f);
-	Box.Margin(20.0f, &Box);
+	CUIRect FullScreen = *Ui()->Screen();
+	FullScreen.Draw(ColorRGBA(BackgroundColor, BackgroundColor, BackgroundColor, 1.0f), IGraphics::CORNER_ALL, 0.0f);
 
-	Box.HSplitTop(24.0f, &Label, &Box);
+	const IGraphics::CTextureHandle &LogoTexture = MainMenuLogoTexture();
+	Graphics()->TextureSet(LogoTexture.IsValid() && !LogoTexture.IsNullTexture() ? LogoTexture : g_pData->m_aImages[IMAGE_BANNER].m_Id);
+	Graphics()->QuadsBegin();
+	Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+	const float LogoWidth = minimum(420.0f, maximum(220.0f, FullScreen.w * 0.38f));
+	const float LogoHeight = LogoWidth / (360.0f / 103.0f);
+	const float LogoY = FullScreen.y + minimum(70.0f, FullScreen.h * 0.12f);
+	IGraphics::CQuadItem LogoQuad(FullScreen.x + (FullScreen.w - LogoWidth) / 2.0f, LogoY, LogoWidth, LogoHeight);
+	Graphics()->QuadsDrawTL(&LogoQuad, 1);
+	Graphics()->QuadsEnd();
+
+	const float LabelWidth = minimum(860.0f, FullScreen.w - 80.0f);
+	CUIRect Label;
+	Label.x = FullScreen.x + (FullScreen.w - LabelWidth) / 2.0f;
+	Label.y = FullScreen.y + FullScreen.h * 0.5f - 28.0f;
+	Label.w = LabelWidth;
+	Label.h = 24.0f;
+
 	Ui()->DoLabel(&Label, Localize("Connecting to"), 24.0f, TEXTALIGN_MC);
 
-	Box.HSplitTop(20.0f, nullptr, &Box);
-	Box.HSplitTop(24.0f, &Label, &Box);
+	Label.y += 32.0f;
 	SLabelProperties Props;
 	Props.m_MaxWidth = Label.w;
 	Props.m_EllipsisAtEnd = true;
@@ -2149,8 +2646,7 @@ void CMenus::RenderPopupConnecting(CUIRect Screen)
 		}
 		if(pConnectivityLabel[0] != '\0')
 		{
-			Box.HSplitTop(20.0f, nullptr, &Box);
-			Box.HSplitTop(24.0f, &Label, &Box);
+			Label.y += 32.0f;
 			SLabelProperties ConnectivityLabelProps;
 			ConnectivityLabelProps.m_MaxWidth = Label.w;
 			if(TextRender()->TextWidth(FontSize, pConnectivityLabel) > Label.w)
@@ -2161,11 +2657,13 @@ void CMenus::RenderPopupConnecting(CUIRect Screen)
 	}
 
 	CUIRect Button;
-	Box.HSplitBottom(24.0f, &Box, &Button);
-	Button.VMargin(100.0f, &Button);
+	Button.w = FullScreen.w - 16.0f;
+	Button.h = 36.0f;
+	Button.x = FullScreen.x + 8.0f;
+	Button.y = FullScreen.y + FullScreen.h - Button.h - 8.0f;
 
 	static CButtonContainer s_Button;
-	if(DoButton_Menu(&s_Button, Localize("Abort"), 0, &Button) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+	if(DoButton_Menu(&s_Button, Localize("Cancel"), 0, &Button) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
 	{
 		Client()->Disconnect();
 		Ui()->SetActiveItem(nullptr);
@@ -2175,6 +2673,7 @@ void CMenus::RenderPopupConnecting(CUIRect Screen)
 
 void CMenus::RenderPopupLoading(CUIRect Screen)
 {
+	(void)Screen;
 	char aTitle[256];
 	char aLabel1[128];
 	char aLabel2[128];
@@ -2242,23 +2741,55 @@ void CMenus::RenderPopupLoading(CUIRect Screen)
 	}
 
 	const float FontSize = 20.0f;
+	const float BackgroundColor = 21.0f / 255.0f;
 
-	CUIRect Box, Label;
-	Screen.Margin(150.0f, &Box);
-	Box.Draw(ColorRGBA(0.0f, 0.0f, 0.0f, 0.5f), IGraphics::CORNER_ALL, 15.0f);
-	Box.Margin(20.0f, &Box);
+	CUIRect FullScreen = *Ui()->Screen();
+	FullScreen.Draw(ColorRGBA(BackgroundColor, BackgroundColor, BackgroundColor, 1.0f), IGraphics::CORNER_ALL, 0.0f);
 
-	Box.HSplitTop(24.0f, &Label, &Box);
-	Ui()->DoLabel(&Label, aTitle, 24.0f, TEXTALIGN_MC);
+	const IGraphics::CTextureHandle &LogoTexture = MainMenuLogoTexture();
+	Graphics()->TextureSet(LogoTexture.IsValid() && !LogoTexture.IsNullTexture() ? LogoTexture : g_pData->m_aImages[IMAGE_BANNER].m_Id);
+	Graphics()->QuadsBegin();
+	Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+	const float LogoWidth = minimum(420.0f, maximum(220.0f, FullScreen.w * 0.38f));
+	const float LogoHeight = LogoWidth / (360.0f / 103.0f);
+	const float LogoY = FullScreen.y + minimum(70.0f, FullScreen.h * 0.12f);
+	IGraphics::CQuadItem LogoQuad(FullScreen.x + (FullScreen.w - LogoWidth) / 2.0f, LogoY, LogoWidth, LogoHeight);
+	Graphics()->QuadsDrawTL(&LogoQuad, 1);
+	Graphics()->QuadsEnd();
 
-	Box.HSplitTop(20.0f, nullptr, &Box);
-	Box.HSplitTop(24.0f, &Label, &Box);
+	const bool HasExtraText = aLabel2[0] != '\0';
+	const bool HasProgressBar = Client()->MapDownloadTotalsize() > 0;
+	const float LabelWidth = minimum(860.0f, FullScreen.w - 80.0f);
+	const float TitleHeight = 24.0f;
+	const float TextHeight = 24.0f;
+	const float TextSpacing = 8.0f;
+	const float ProgressSpacing = 16.0f;
+	const float ProgressHeight = 24.0f;
+
+	float ContentHeight = TitleHeight + TextSpacing + TextHeight;
+	if(HasExtraText)
+		ContentHeight += TextSpacing + TextHeight;
+	if(HasProgressBar)
+		ContentHeight += ProgressSpacing + ProgressHeight;
+
+	CUIRect Label;
+	Label.x = FullScreen.x + (FullScreen.w - LabelWidth) / 2.0f;
+	Label.y = FullScreen.y + FullScreen.h * 0.5f - ContentHeight / 2.0f;
+	Label.w = LabelWidth;
+	Label.h = TitleHeight;
+
+	SLabelProperties TitleProps;
+	TitleProps.m_MaxWidth = Label.w;
+	TitleProps.m_EllipsisAtEnd = true;
+	Ui()->DoLabel(&Label, aTitle, 24.0f, TEXTALIGN_MC, TitleProps);
+
+	Label.y += TitleHeight + TextSpacing;
+	Label.h = TextHeight;
 	Ui()->DoLabel(&Label, aLabel1, FontSize, TEXTALIGN_MC);
 
-	if(aLabel2[0] != '\0')
+	if(HasExtraText)
 	{
-		Box.HSplitTop(20.0f, nullptr, &Box);
-		Box.HSplitTop(24.0f, &Label, &Box);
+		Label.y += TextHeight + TextSpacing;
 		SLabelProperties ExtraTextProps;
 		ExtraTextProps.m_MaxWidth = Label.w;
 		if(TextRender()->TextWidth(FontSize, aLabel2) > Label.w)
@@ -2267,21 +2798,24 @@ void CMenus::RenderPopupLoading(CUIRect Screen)
 			Ui()->DoLabel(&Label, aLabel2, FontSize, TEXTALIGN_MC);
 	}
 
-	if(Client()->MapDownloadTotalsize() > 0)
+	if(HasProgressBar)
 	{
 		CUIRect ProgressBar;
-		Box.HSplitTop(20.0f, nullptr, &Box);
-		Box.HSplitTop(24.0f, &ProgressBar, &Box);
-		ProgressBar.VMargin(20.0f, &ProgressBar);
+		ProgressBar.x = Label.x;
+		ProgressBar.w = Label.w;
+		ProgressBar.h = ProgressHeight;
+		ProgressBar.y = Label.y + TextHeight + ProgressSpacing;
 		Ui()->RenderProgressBar(ProgressBar, Client()->MapDownloadAmount() / (float)Client()->MapDownloadTotalsize());
 	}
 
 	CUIRect Button;
-	Box.HSplitBottom(24.0f, &Box, &Button);
-	Button.VMargin(100.0f, &Button);
+	Button.w = FullScreen.w - 16.0f;
+	Button.h = 36.0f;
+	Button.x = FullScreen.x + 8.0f;
+	Button.y = FullScreen.y + FullScreen.h - Button.h - 8.0f;
 
 	static CButtonContainer s_Button;
-	if(DoButton_Menu(&s_Button, Localize("Abort"), 0, &Button) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
+	if(DoButton_Menu(&s_Button, Localize("Cancel"), 0, &Button) || Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
 	{
 		Client()->Disconnect();
 		Ui()->SetActiveItem(nullptr);
@@ -2387,10 +2921,30 @@ void CMenus::SetActive(bool Active)
 	{
 		Ui()->SetHotItem(nullptr);
 		Ui()->SetActiveItem(nullptr);
+
+		const bool IngameMenuState = Client()->State() == IClient::STATE_ONLINE || Client()->State() == IClient::STATE_DEMOPLAYBACK;
+		if(IngameMenuState)
+		{
+			if(Active)
+			{
+				PlayIngameMenuOpenSfx();
+				m_MenuSfxSuppressNextIngameClose = false;
+			}
+			else if(m_MenuSfxSuppressNextIngameClose)
+			{
+				m_MenuSfxSuppressNextIngameClose = false;
+			}
+			else
+			{
+				PlayIngameMenuCloseSfx();
+			}
+		}
 	}
 	m_MenuActive = Active;
 	if(!m_MenuActive)
 	{
+		m_BcIngameMenuClosing = false;
+		m_BcIngameMenuOpenPhase = 0.0f;
 		if(m_NeedSendinfo)
 		{
 			GameClient()->SendInfo(false);
@@ -2408,18 +2962,36 @@ void CMenus::SetActive(bool Active)
 			GameClient()->OnRelease();
 		}
 	}
-	else if(Client()->State() == IClient::STATE_DEMOPLAYBACK)
+	else
 	{
-		GameClient()->OnRelease();
+		if(Client()->State() == IClient::STATE_DEMOPLAYBACK)
+			GameClient()->OnRelease();
+
+		m_BcIngameMenuClosing = false;
+		if(Client()->State() == IClient::STATE_ONLINE || Client()->State() == IClient::STATE_DEMOPLAYBACK)
+			m_BcIngameMenuOpenPhase = (BCUiAnimations::Enabled() && g_Config.m_BcIngameMenuAnimation != 0 && g_Config.m_BcIngameMenuAnimationMs > 0) ? 0.0f : 1.0f;
+		else
+			m_BcIngameMenuOpenPhase = 1.0f;
 	}
 }
 
 void CMenus::OnReset()
 {
+	m_MenuMediaBackground.Unload();
 }
 
 void CMenus::OnShutdown()
 {
+	if(!m_MenuSfxExitPlayed)
+	{
+		if(!m_MenuSfxLoaded)
+			LoadMenuSfx();
+		PlayMenuSfxSample(EMenuSfxSample::SCREEN_BACK);
+		m_MenuSfxExitPlayed = true;
+	}
+	Ui()->ClearButtonSoundEventCallback();
+	UnloadMenuSfx();
+	m_MenuMediaBackground.Shutdown();
 	m_CommunityIcons.Shutdown();
 }
 
@@ -2439,6 +3011,20 @@ bool CMenus::OnInput(const IInput::CEvent &Event)
 	// Escape key is always handled to activate/deactivate menu
 	if((Event.m_Flags & IInput::FLAG_PRESS && Event.m_Key == KEY_ESCAPE) || IsActive())
 	{
+		if((Event.m_Flags & IInput::FLAG_PRESS) && Event.m_Key == KEY_ESCAPE &&
+			IsActive() && (Client()->State() == IClient::STATE_ONLINE || Client()->State() == IClient::STATE_DEMOPLAYBACK) &&
+			BCUiAnimations::Enabled() && g_Config.m_BcIngameMenuAnimation != 0 && g_Config.m_BcIngameMenuAnimationMs > 0 &&
+			!Ui()->IsPopupOpen())
+		{
+			if(!m_BcIngameMenuClosing)
+			{
+				PlayIngameMenuCloseSfx();
+				m_MenuSfxSuppressNextIngameClose = true;
+			}
+			m_BcIngameMenuClosing = true;
+			return true;
+		}
+
 		Ui()->OnInput(Event);
 		return true;
 	}
@@ -2449,6 +3035,16 @@ void CMenus::OnStateChange(int NewState, int OldState)
 {
 	// reset active item
 	Ui()->SetActiveItem(nullptr);
+
+	if((NewState == IClient::STATE_QUITTING || NewState == IClient::STATE_RESTARTING) && !m_MenuSfxExitPlayed)
+	{
+		if(!m_MenuSfxLoaded)
+			LoadMenuSfx();
+		PlayMenuSfxSample(EMenuSfxSample::SCREEN_BACK);
+		m_MenuSfxExitPlayed = true;
+	}
+	if(NewState == IClient::STATE_QUITTING || NewState == IClient::STATE_RESTARTING)
+		m_MenuSfxQuitPending = false;
 
 	if(OldState == IClient::STATE_ONLINE || OldState == IClient::STATE_OFFLINE)
 		TextRender()->DeleteTextContainer(m_MotdTextContainerIndex);
@@ -2481,6 +3077,7 @@ void CMenus::OnStateChange(int NewState, int OldState)
 		if(m_Popup != POPUP_WARNING)
 		{
 			m_Popup = POPUP_NONE;
+			m_MenuSfxSuppressNextIngameClose = true;
 			SetActive(false);
 		}
 	}
@@ -2493,6 +3090,13 @@ void CMenus::OnWindowResize()
 
 void CMenus::OnRender()
 {
+	if(m_MenuSfxQuitPending && time_get() >= m_MenuSfxQuitAt)
+	{
+		m_MenuSfxQuitPending = false;
+		Client()->Quit();
+		return;
+	}
+
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 		SetActive(true);
 
@@ -2519,13 +3123,94 @@ void CMenus::OnRender()
 	Ui()->StartCheck();
 	UpdateColors();
 
+	if(IsActive())
+	{
+		Ui()->SetButtonSoundEventCallback([this](CUi::EUiSoundEvent Event, CUi::EButtonSoundType SoundType, bool Enabled, int Checked, float Pitch) {
+			MenuButtonSoundEvent(Event, SoundType, Enabled, Checked, Pitch);
+		});
+	}
+	else
+	{
+		Ui()->ClearButtonSoundEventCallback();
+	}
+
+	const bool IngameMenu = IsActive() && (Client()->State() == IClient::STATE_ONLINE || Client()->State() == IClient::STATE_DEMOPLAYBACK);
+	const bool ConsoleActive = GameClient()->m_GameConsole.IsActive();
+	const bool UseWindowAspectForUi = IngameMenu && g_Config.m_BcCustomAspectRatioApplyMode != 1;
+	Ui()->SetUseGraphicsScreenAspect(!UseWindowAspectForUi);
+	const bool IngameMenuAnimated = IngameMenu && BCUiAnimations::Enabled() && g_Config.m_BcIngameMenuAnimation != 0 && g_Config.m_BcIngameMenuAnimationMs > 0;
+	if(IngameMenuAnimated)
+	{
+		const bool AllowInput = !ConsoleActive && !m_BcIngameMenuClosing && m_BcIngameMenuOpenPhase >= 0.999f;
+		Ui()->SetEnabled(AllowInput);
+		if(!AllowInput)
+		{
+			Ui()->SetHotItem(nullptr);
+			Ui()->SetActiveItem(nullptr);
+			if(ConsoleActive)
+				Ui()->ClearHotkeys();
+		}
+	}
+	else
+	{
+		Ui()->SetEnabled(!ConsoleActive);
+		if(ConsoleActive)
+		{
+			Ui()->SetHotItem(nullptr);
+			Ui()->SetActiveItem(nullptr);
+			Ui()->ClearHotkeys();
+		}
+	}
+
 	Ui()->Update();
+
+	if(IngameMenu)
+	{
+		if(BCUiAnimations::Enabled() && g_Config.m_BcIngameMenuAnimation != 0 && g_Config.m_BcIngameMenuAnimationMs > 0)
+		{
+			const float Target = m_BcIngameMenuClosing ? 0.0f : 1.0f;
+			BCUiAnimations::UpdatePhase(m_BcIngameMenuOpenPhase, Target, Client()->RenderFrameTime(), BCUiAnimations::MsToSeconds(g_Config.m_BcIngameMenuAnimationMs));
+			if(m_BcIngameMenuClosing && m_BcIngameMenuOpenPhase <= 0.0f)
+			{
+				Ui()->SetEnabled(true);
+				Ui()->SetUseGraphicsScreenAspect(true);
+				SetActive(false);
+				Ui()->FinishCheck();
+				Ui()->ClearHotkeys();
+				return;
+			}
+		}
+		else
+		{
+			m_BcIngameMenuOpenPhase = 1.0f;
+		}
+	}
+
+	// Precompute overlay state before Render() so we can block menu interactions
+	static bool s_StuckOverlayDismissed = false;
+	static int s_StuckLastMode = -99;
+	static int s_StuckLastRatio = -99;
+	if(s_StuckLastMode != g_Config.m_BcCustomAspectRatioMode || s_StuckLastRatio != g_Config.m_BcCustomAspectRatio)
+	{
+		s_StuckOverlayDismissed = false;
+		s_StuckLastMode = g_Config.m_BcCustomAspectRatioMode;
+		s_StuckLastRatio = g_Config.m_BcCustomAspectRatio;
+	}
+	const bool AspectOverlayActive = g_Config.m_BcCustomAspectRatioApplyMode == 1 &&
+		(g_Config.m_BcCustomAspectRatioMode > 0 ||
+		(g_Config.m_BcCustomAspectRatioMode < 0 && g_Config.m_BcCustomAspectRatio > 0));
+	const bool ShowStuckOverlay = IsActive() && AspectOverlayActive && !s_StuckOverlayDismissed;
+	// Block menu button fires: clear active item so no DoButtonLogic fires this frame
+	if(ShowStuckOverlay)
+		Ui()->SetActiveItem(nullptr);
 
 	Render();
 
-	if(IsActive())
+	// After Render: discard buttons that became active, and suppress hot item next frame
+	if(ShowStuckOverlay)
 	{
-		RenderTools()->RenderCursor(Ui()->MousePos(), 24.0f);
+		Ui()->SetActiveItem(nullptr);
+		Ui()->SetHotItem(nullptr);
 	}
 
 	// render debug information
@@ -2533,10 +3218,83 @@ void CMenus::OnRender()
 		Ui()->DebugRender(2.0f, Ui()->Screen()->h - 12.0f);
 
 	if(Ui()->ConsumeHotkey(CUi::HOTKEY_ESCAPE))
-		SetActive(false);
+	{
+		Ui()->SetHotItem(nullptr);
+		Ui()->SetActiveItem(nullptr);
+		if(IngameMenuAnimated)
+		{
+			if(!m_BcIngameMenuClosing)
+			{
+				PlayIngameMenuCloseSfx();
+				m_MenuSfxSuppressNextIngameClose = true;
+			}
+			m_BcIngameMenuClosing = true;
+		}
+		else
+			SetActive(false);
+	}
+
+	// Safety overlay: shown in menu when aspect ratio "Full" mode is active.
+	// Renders in real window coordinates so it stays readable regardless of distortion.
+	// Uses UpdatedMousePos (raw pixels) → real virtual coords to avoid the distorted m_MousePos.
+	if(ShowStuckOverlay)
+	{
+		Ui()->SetUseGraphicsScreenAspect(false);
+		Ui()->MapScreen();
+		const CUIRect *pReal = Ui()->Screen();
+
+		// Convert raw pixel mouse to real virtual coords
+		const float WinW = (float)Graphics()->ScreenWidth();
+		const float WinH = (float)Graphics()->ScreenHeight();
+		const vec2 RawMouse = Ui()->UpdatedMousePos();
+		const vec2 RealMouse = vec2(RawMouse.x * pReal->w / WinW, RawMouse.y * pReal->h / WinH);
+
+		const float PanelW = minimum(360.0f, pReal->w - 12.0f);
+		CUIRect Panel;
+		Panel.x = pReal->x + (pReal->w - PanelW) * 0.5f;
+		Panel.y = pReal->y + 6.0f;
+		Panel.w = PanelW;
+		Panel.h = 30.0f;
+		Graphics()->DrawRect(Panel.x, Panel.y, Panel.w, Panel.h, ColorRGBA(0.0f, 0.0f, 0.0f, 0.82f), IGraphics::CORNER_ALL, 5.0f);
+		Panel.Margin(2.0f, &Panel);
+
+		CUIRect StuckBtn, CloseBtn;
+		Panel.VSplitRight(80.0f, &Panel, &CloseBtn);
+		CloseBtn.VMargin(2.0f, &CloseBtn);
+		Panel.VSplitRight(4.0f, &Panel, nullptr);
+		Panel.VSplitRight(88.0f, &Panel, &StuckBtn);
+		StuckBtn.VMargin(2.0f, &StuckBtn);
+		Panel.VSplitRight(4.0f, &Panel, nullptr);
+		Ui()->DoLabel(&Panel, "Aspect ratio: Full", 10.0f, TEXTALIGN_ML);
+
+		auto RenderOverlayBtn = [&](const CUIRect &Rect, const char *pText, ColorRGBA Normal, ColorRGBA Hovered) -> bool {
+			const bool Hover = RealMouse.x >= Rect.x && RealMouse.x < Rect.x + Rect.w &&
+				RealMouse.y >= Rect.y && RealMouse.y < Rect.y + Rect.h;
+			Graphics()->DrawRect(Rect.x, Rect.y, Rect.w, Rect.h, Hover ? Hovered : Normal, IGraphics::CORNER_ALL, 3.0f);
+			Ui()->DoLabel(&Rect, pText, 10.5f, TEXTALIGN_MC);
+			return Hover && Ui()->MouseButtonClicked(0);
+		};
+
+		if(RenderOverlayBtn(StuckBtn, "I'm stuck", ColorRGBA(0.45f, 0.18f, 0.18f, 1.0f), ColorRGBA(0.7f, 0.28f, 0.28f, 1.0f)))
+		{
+			g_Config.m_BcCustomAspectRatioMode = 0;
+			g_Config.m_BcCustomAspectRatio = 0;
+			GameClient()->m_TClient.SetForcedAspect();
+		}
+		if(RenderOverlayBtn(CloseBtn, "Looks fine", ColorRGBA(0.18f, 0.36f, 0.18f, 1.0f), ColorRGBA(0.28f, 0.55f, 0.28f, 1.0f)))
+			s_StuckOverlayDismissed = true;
+
+		// Restore original coordinate system before cursor render
+		Ui()->SetUseGraphicsScreenAspect(!UseWindowAspectForUi);
+		Ui()->MapScreen();
+	}
+
+	if(IsActive())
+		RenderTools()->RenderCursor(Ui()->MousePos(), 24.0f);
 
 	Ui()->FinishCheck();
 	Ui()->ClearHotkeys();
+	Ui()->SetUseGraphicsScreenAspect(true);
 }
 
 void CMenus::UpdateColors()
@@ -2686,6 +3444,7 @@ const CMenus::CMenuImage *CMenus::FindMenuImage(const char *pName)
 
 void CMenus::SetMenuPage(int NewPage)
 {
+	NewPage = NormalizeMenuPage(NewPage);
 	const int OldPage = m_MenuPage;
 	m_MenuPage = NewPage;
 	if(NewPage >= PAGE_INTERNET && NewPage <= PAGE_FAVORITE_COMMUNITY_5)
@@ -2706,6 +3465,7 @@ void CMenus::SetMenuPage(int NewPage)
 
 void CMenus::RefreshBrowserTab(bool Force)
 {
+	bool BrowserRefreshed = false;
 	if(g_Config.m_UiPage == PAGE_INTERNET)
 	{
 		if(Force || ServerBrowser()->GetCurrentType() != IServerBrowser::TYPE_INTERNET)
@@ -2716,6 +3476,8 @@ void CMenus::RefreshBrowserTab(bool Force)
 			}
 			ServerBrowser()->Refresh(IServerBrowser::TYPE_INTERNET);
 			UpdateCommunityCache(true);
+			m_LastServerBrowserRefreshTick = time_get();
+			BrowserRefreshed = true;
 		}
 	}
 	else if(g_Config.m_UiPage == PAGE_LAN)
@@ -2724,6 +3486,8 @@ void CMenus::RefreshBrowserTab(bool Force)
 		{
 			ServerBrowser()->Refresh(IServerBrowser::TYPE_LAN);
 			UpdateCommunityCache(true);
+			m_LastServerBrowserRefreshTick = time_get();
+			BrowserRefreshed = true;
 		}
 	}
 	else if(g_Config.m_UiPage == PAGE_FAVORITES)
@@ -2736,6 +3500,8 @@ void CMenus::RefreshBrowserTab(bool Force)
 			}
 			ServerBrowser()->Refresh(IServerBrowser::TYPE_FAVORITES);
 			UpdateCommunityCache(true);
+			m_LastServerBrowserRefreshTick = time_get();
+			BrowserRefreshed = true;
 		}
 	}
 	else if(g_Config.m_UiPage >= PAGE_FAVORITE_COMMUNITY_1 && g_Config.m_UiPage <= PAGE_FAVORITE_COMMUNITY_5)
@@ -2749,8 +3515,13 @@ void CMenus::RefreshBrowserTab(bool Force)
 			}
 			ServerBrowser()->Refresh(BrowserType);
 			UpdateCommunityCache(true);
+			m_LastServerBrowserRefreshTick = time_get();
+			BrowserRefreshed = true;
 		}
 	}
+
+	if(BrowserRefreshed)
+		GameClient()->m_ClientIndicator.RefreshBrowserCache(false);
 }
 
 void CMenus::ForceRefreshLanPage()
@@ -2766,6 +3537,36 @@ void CMenus::SetShowStart(bool ShowStart)
 void CMenus::ShowQuitPopup()
 {
 	m_Popup = POPUP_QUIT;
+}
+
+void CMenus::QuitWithMenuSfx()
+{
+	if(Client()->State() == IClient::STATE_QUITTING || Client()->State() == IClient::STATE_RESTARTING)
+		return;
+
+	if(!m_MenuSfxLoaded)
+		LoadMenuSfx();
+
+	const int ExitSample = m_aMenuSfxSamples[(size_t)EMenuSfxSample::SCREEN_BACK];
+	const bool CanDelayQuitForSfx = g_Config.m_SndEnable && g_Config.m_BcMenuSfx && ExitSample >= 0;
+	if(CanDelayQuitForSfx)
+	{
+		if(!m_MenuSfxExitPlayed)
+		{
+			PlayMenuSfxSample(ExitSample);
+			m_MenuSfxExitPlayed = true;
+		}
+
+		if(!m_MenuSfxQuitPending)
+		{
+			const float DelaySeconds = std::clamp(Sound()->GetSampleTotalTime(ExitSample), 0.08f, 0.35f);
+			m_MenuSfxQuitAt = time_get() + (int64_t)(DelaySeconds * time_freq());
+			m_MenuSfxQuitPending = true;
+		}
+		return;
+	}
+
+	Client()->Quit();
 }
 
 void CMenus::JoinTutorial()

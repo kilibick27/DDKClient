@@ -59,6 +59,8 @@ class CGameConsole : public CComponent
 		int m_CurSelEnd = 0;
 		bool m_HasSelection = false;
 		int m_NewLineCounter = 0;
+		bool m_ScrollbarDragging = false;
+		float m_ScrollbarDragOffset = 0.0f;
 
 		CGameConsole *m_pGameConsole;
 
@@ -137,6 +139,8 @@ class CGameConsole : public CComponent
 		static void PossibleArgumentsCompleteCallback(int Index, const char *pStr, void *pUser);
 
 		void UpdateEntryTextAttributes(CBacklogEntry *pEntry) const;
+		int TotalBacklogLines();
+		float LogLineWidth() const;
 
 		bool IsInputHidden() const;
 		void UpdateCompletionSuggestions();
@@ -162,6 +166,7 @@ class CGameConsole : public CComponent
 	int m_ConsoleState;
 	float m_StateChangeEnd;
 	float m_StateChangeDuration;
+	float m_IgnoreAndroidEscapeUntil = 0.0f;
 
 	bool m_WantsSelectionCopy = false;
 	CUi::CTouchState m_TouchState;
@@ -198,6 +203,7 @@ public:
 
 	void PrintLine(int Type, const char *pLine);
 	void RequireUsername(bool UsernameReq);
+	bool RconUsernameRequired() const { return m_RemoteConsole.m_UsernameReq; }
 
 	void OnStateChange(int NewState, int OldState) override;
 	void OnConsoleInit() override;
@@ -205,6 +211,7 @@ public:
 	void OnReset() override;
 	void OnRender() override;
 	void OnMessage(int MsgType, void *pRawMsg) override;
+	bool OnCursorMove(float x, float y, IInput::ECursorType CursorType) override;
 	bool OnInput(const IInput::CEvent &Event) override;
 	void Prompt(char (&aPrompt)[32]);
 

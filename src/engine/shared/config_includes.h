@@ -11,5 +11,5 @@ SET_CONFIG_DOMAIN(ConfigDomain::DDNET)
 SET_CONFIG_DOMAIN(ConfigDomain::TCLIENT)
 #include "config_variables_tclient.h"
 
-SET_CONFIG_DOMAIN(ConfigDomain::TCLIENTDUMMY)
-#include "config_variables_dummy.h"
+SET_CONFIG_DOMAIN(ConfigDomain::BESTCLIENT)
+#include "config_variables_bestclient.h"

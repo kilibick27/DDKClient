@@ -228,6 +228,10 @@ class CClient : public IClient, public CDemoPlayer::IListener
 	int64_t m_CurrentServerCurrentPingTime = -1; // >= 0 request running
 	int64_t m_CurrentServerNextPingTime = -1; // >= 0 should request
 
+	mutable int64_t m_AutoMarginLastSampleTime = 0;
+	mutable float m_AutoMarginLatencyAverageMs = 0.0f;
+	mutable float m_AutoMarginLatencyJitterMs = 0.0f;
+
 	// version info
 	struct CVersionInfo
 	{
@@ -299,7 +303,7 @@ public:
 	// Send via the currently active client (main/dummy)
 	int SendMsgActive(CMsgPacker *pMsg, int Flags) override;
 
-	void SendTClientInfo(int Conn);
+	void SendBClientInfo(int Conn);
 	void SendInfo(int Conn);
 	void SendEnterGame(int Conn);
 	void SendReady(int Conn);

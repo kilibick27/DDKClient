@@ -7,6 +7,7 @@
 
 #include <base/log.h>
 #include <base/math.h>
+#include <base/system.h>
 #include <base/vmath.h>
 
 #include <engine/shared/config.h>
@@ -43,7 +44,6 @@ CCamera::CCamera()
 	m_DyncamTargetCameraOffset = vec2(0, 0);
 	std::fill(std::begin(m_aDyncamCurrentCameraOffset), std::end(m_aDyncamCurrentCameraOffset), vec2(0.0f, 0.0f));
 	m_DyncamSmoothingSpeedBias = 0.5f;
-
 	m_AutoSpecCamera = true;
 	m_AutoSpecCameraZooming = false;
 	m_CanUseCameraInfo = false;
@@ -287,6 +287,38 @@ void CCamera::UpdateCamera()
 	m_aDyncamCurrentCameraOffset[g_Config.m_ClDummy] = CurrentCameraOffset;
 	m_CanUseCameraInfo = CanUseCameraInfo;
 	m_UsingAutoSpecCamera = UsingAutoSpecCamera;
+
+	const bool IsOnline = Client()->State() == IClient::STATE_ONLINE;
+	const bool IsFngServer = IsOnline && GameClient()->m_GameInfo.m_PredictFNG;
+	const bool Is0xFServer = IsOnline && str_comp_nocase(GameClient()->m_GameInfo.m_aGameType, "0xf") == 0;
+	const bool IsBlockedCameraServer = IsFngServer || Is0xFServer;
+	(void)IsBlockedCameraServer;
+
+	const bool IsDemoPlayback = Client()->State() == IClient::STATE_DEMOPLAYBACK;
+	const CNetObj_Character *pDemoTrackedCharacter = nullptr;
+	const CNetObj_Character *pDemoTrackedPrevCharacter = nullptr;
+	(void)pDemoTrackedCharacter;
+	(void)pDemoTrackedPrevCharacter;
+	if(IsDemoPlayback)
+	{
+		int TrackedClientId = -1;
+		if(GameClient()->m_Snap.m_SpecInfo.m_Active)
+		{
+			const int SpectatorId = GameClient()->m_Snap.m_SpecInfo.m_SpectatorId;
+			if(in_range(SpectatorId, 0, MAX_CLIENTS - 1) && GameClient()->m_Snap.m_aCharacters[SpectatorId].m_Active)
+				TrackedClientId = SpectatorId;
+		}
+		else if(in_range(GameClient()->m_Snap.m_LocalClientId, 0, MAX_CLIENTS - 1) && GameClient()->m_Snap.m_aCharacters[GameClient()->m_Snap.m_LocalClientId].m_Active)
+		{
+			TrackedClientId = GameClient()->m_Snap.m_LocalClientId;
+		}
+
+		if(TrackedClientId >= 0)
+		{
+			pDemoTrackedCharacter = &GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Cur;
+			pDemoTrackedPrevCharacter = &GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Prev;
+		}
+	}
 }
 
 void CCamera::OnRender()
@@ -326,18 +358,35 @@ void CCamera::OnRender()
 			m_aLastPos[g_Config.m_ClDummy] = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
 			GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy] = m_PrevCenter;
 			GameClient()->m_Controls.m_aMouseInputType[g_Config.m_ClDummy] = CControls::EMouseInputType::AUTOMATED;
-			GameClient()->m_Controls.ClampMousePos();
+			// GameClient()->m_Controls.ClampMousePos();
 			m_CamType = CAMTYPE_SPEC;
 		}
-		m_Center = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
+		const vec2 TargetCenter = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
+		if(g_Config.m_BcCinematicCamera)
+		{
+			if(!m_CinematicCameraSmoothing)
+			{
+				m_CinematicCameraPosition = m_Center;
+				m_CinematicCameraSmoothing = true;
+			}
+			const float FollowSpeed = 8.0f;
+			m_CinematicCameraPosition += (TargetCenter - m_CinematicCameraPosition) * minimum(Client()->RenderFrameTime() * FollowSpeed, 1.0f);
+			m_Center = m_CinematicCameraPosition;
+		}
+		else
+		{
+			m_Center = TargetCenter;
+			m_CinematicCameraSmoothing = false;
+		}
 	}
 	else
 	{
+		m_CinematicCameraSmoothing = false;
 		if(m_CamType != CAMTYPE_PLAYER)
 		{
 			GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy] = m_aLastPos[g_Config.m_ClDummy];
 			GameClient()->m_Controls.m_aMouseInputType[g_Config.m_ClDummy] = CControls::EMouseInputType::AUTOMATED;
-			GameClient()->m_Controls.ClampMousePos();
+			// GameClient()->m_Controls.ClampMousePos();
 			m_CamType = CAMTYPE_PLAYER;
 		}
 
@@ -355,7 +404,35 @@ void CCamera::OnRender()
 	}
 	else
 		m_ForceFreeviewPos = m_Center;
+	if(m_CamType == CAMTYPE_SPEC)
+	{
+		const float SmoothFreeviewSpeed = 180.0f;
+		const float SmoothFreeviewAcceleration = 2.5f;
+		const float FrameTime = Client()->RenderFrameTime();
+		vec2 FreeviewMove = vec2(0.0f, 0.0f);
+		static vec2 s_SmoothFreeviewVelocity = vec2(0.0f, 0.0f);
 
+		if(Input()->KeyIsPressed(KEY_KP_4))
+			FreeviewMove.x -= 1.0f;
+		if(Input()->KeyIsPressed(KEY_KP_6))
+			FreeviewMove.x += 1.0f;
+		if(Input()->KeyIsPressed(KEY_KP_8))
+			FreeviewMove.y -= 1.0f;
+		if(Input()->KeyIsPressed(KEY_KP_2))
+			FreeviewMove.y += 1.0f;
+
+		const vec2 TargetVelocity = FreeviewMove * SmoothFreeviewSpeed;
+		s_SmoothFreeviewVelocity += (TargetVelocity - s_SmoothFreeviewVelocity) * minimum(FrameTime * SmoothFreeviewAcceleration, 1.0f);
+
+		if(absolute(s_SmoothFreeviewVelocity.x) < 0.1f && absolute(s_SmoothFreeviewVelocity.y) < 0.1f)
+			s_SmoothFreeviewVelocity = vec2(0.0f, 0.0f);
+
+		if(s_SmoothFreeviewVelocity.x != 0.0f || s_SmoothFreeviewVelocity.y != 0.0f)
+		{
+			m_ForceFreeviewPos = m_Center + s_SmoothFreeviewVelocity * FrameTime;
+			m_ForceFreeview = true;
+		}
+	}
 	const int SpecId = GameClient()->m_Snap.m_SpecInfo.m_SpectatorId;
 
 	// start smoothing from the current position when the target changes
@@ -434,7 +511,8 @@ void CCamera::ConZoomPlus(IConsole::IResult *pResult, void *pUserData)
 	if(!pSelf->ZoomAllowed())
 		return;
 
-	float ZoomAmount = pResult->NumArguments() ? pResult->GetFloat(0) : 1.0f;
+	const float DefaultStep = g_Config.m_BcExtendZoom ? 0.5f : 1.0f;
+	float ZoomAmount = pResult->NumArguments() ? pResult->GetFloat(0) : DefaultStep;
 
 	pSelf->ScaleZoom(CCamera::ZoomStepsToValue(ZoomAmount));
 
@@ -447,7 +525,8 @@ void CCamera::ConZoomMinus(IConsole::IResult *pResult, void *pUserData)
 	if(!pSelf->ZoomAllowed())
 		return;
 
-	float ZoomAmount = pResult->NumArguments() ? pResult->GetFloat(0) : 1.0f;
+	const float DefaultStep = g_Config.m_BcExtendZoom ? 0.5f : 1.0f;
+	float ZoomAmount = pResult->NumArguments() ? pResult->GetFloat(0) : DefaultStep;
 	ZoomAmount *= -1.0f;
 
 	pSelf->ScaleZoom(CCamera::ZoomStepsToValue(ZoomAmount));

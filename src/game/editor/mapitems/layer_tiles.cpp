@@ -87,6 +87,14 @@ void CLayerTiles::SetTile(int x, int y, CTile Tile)
 	SetTileIgnoreHistory(x, y, Tile);
 	RecordStateChange(x, y, CurrentTile, Tile);
 
+	if(Editor()->m_DuoSession.IsLive())
+	{
+		int GroupIdx = -1, LayerIdx = -1;
+		Editor()->m_DuoSession.FindGroupAndLayer(this, GroupIdx, LayerIdx);
+		if(GroupIdx >= 0 && LayerIdx >= 0)
+			Editor()->m_DuoSession.NotifyTileEdit(GroupIdx, LayerIdx, x, y, Tile.m_Index, Tile.m_Flags);
+	}
+
 	if(m_FillGameTile != -1 && m_LiveGameTiles)
 	{
 		std::shared_ptr<CLayerTiles> pLayer = Map()->m_pGameLayer;
@@ -1114,6 +1122,8 @@ CUi::EPopupMenuFunctionResult CLayerTiles::RenderProperties(CUIRect *pToolBox)
 				m_Image = -1;
 			}
 		}
+		if(!Map()->m_vSelectedLayers.empty())
+			Editor()->m_DuoSession.NotifySetImage(Map()->m_SelectedGroup, Map()->m_vSelectedLayers[0], m_Image);
 	}
 	else if(Prop == ETilesProp::COLOR)
 	{
@@ -1178,6 +1188,18 @@ CUi::EPopupMenuFunctionResult CLayerTiles::RenderProperties(CUIRect *pToolBox)
 	// This is usually the resulting text of the edit layer tiles prop action
 	// Since we may also squeeze a tile changes action, we want both to appear as one, thus using a bulk
 	Map()->m_EditorHistory.EndBulk(0);
+
+	// Duo sync: notify partner of property change (only on final state, not during drag)
+	if((State == EEditState::END || State == EEditState::ONE_GO) && !Map()->m_vSelectedLayers.empty())
+	{
+		if(Prop == ETilesProp::WIDTH || Prop == ETilesProp::HEIGHT ||
+			Prop == ETilesProp::COLOR || Prop == ETilesProp::AUTOMAPPER ||
+			Prop == ETilesProp::SEED || Prop == ETilesProp::COLOR_ENV ||
+			Prop == ETilesProp::COLOR_ENV_OFFSET || Prop == ETilesProp::LIVE_GAMETILES)
+		{
+			Editor()->m_DuoSession.NotifyLayerProp(Map()->m_SelectedGroup, Map()->m_vSelectedLayers[0], (int)Prop, NewVal);
+		}
+	}
 
 	return CUi::POPUP_KEEP_OPEN;
 }

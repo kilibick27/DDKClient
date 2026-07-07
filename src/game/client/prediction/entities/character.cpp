@@ -13,6 +13,23 @@
 #include <game/mapitems.h>
 
 // Character, "physical" player's part
+namespace
+{
+bool IsValidWeaponIndex(int Weapon)
+{
+	return Weapon >= WEAPON_HAMMER && Weapon < NUM_WEAPONS;
+}
+
+int FindFirstOwnedWeapon(const CCharacterCore &Core)
+{
+	for(int Weapon = WEAPON_HAMMER; Weapon < NUM_WEAPONS; ++Weapon)
+	{
+		if(Core.m_aWeapons[Weapon].m_Got)
+			return Weapon;
+	}
+	return -1;
+}
+} // namespace
 
 void CCharacter::SetWeapon(int Weapon)
 {
@@ -53,6 +70,8 @@ bool CCharacter::IsGrounded()
 void CCharacter::HandleJetpack()
 {
 	if(m_NumInputs < 2)
+		return;
+	if(!IsValidWeaponIndex(m_Core.m_ActiveWeapon))
 		return;
 
 	vec2 Direction = normalize(vec2(m_LatestInput.m_TargetX, m_LatestInput.m_TargetY));
@@ -263,6 +282,8 @@ void CCharacter::FireWeapon()
 		return;
 
 	DoWeaponSwitch();
+	if(!IsValidWeaponIndex(m_Core.m_ActiveWeapon))
+		return;
 	vec2 Direction = normalize(vec2(m_LatestInput.m_TargetX, m_LatestInput.m_TargetY));
 
 	bool FullAuto = false;
@@ -1045,6 +1066,79 @@ void CCharacter::HandleTiles(int Index)
 		if(NewJumps != m_Core.m_Jumps)
 			m_Core.m_Jumps = NewJumps;
 	}
+
+	if(!GameWorld()->m_WorldConfig.m_PredictTeleports)
+		return;
+
+	if(m_Core.m_Super || m_Core.m_Invincible)
+		return;
+
+	// Process teleport tiles only for the tee's current center tile.
+	// Using anti-skip path indices here can trigger teleports too early
+	// compared to point-based character position checks.
+	if(MapIndex != Collision()->GetMapIndex(m_Pos))
+		return;
+
+	const auto TeleportTo = [&](const vec2 &TelePos, bool ResetVelocity, bool ReleaseHooked) {
+		m_Core.m_Pos = TelePos;
+		if(ResetVelocity)
+			m_Core.m_Vel = vec2(0.0f, 0.0f);
+		if(!g_Config.m_SvTeleportHoldHook)
+		{
+			ResetHook();
+			if(ReleaseHooked)
+				GameWorld()->ReleaseHooked(GetCid());
+		}
+		m_Pos = m_Core.m_Pos;
+		m_PrevPos = m_Core.m_Pos;
+		m_PrevPrevPos = m_Core.m_Pos;
+	};
+
+	const int Teleport = Collision()->IsTeleport(MapIndex);
+	if(!g_Config.m_SvOldTeleportHook && !g_Config.m_SvOldTeleportWeapons && Teleport > 0 && !Collision()->TeleOuts(Teleport - 1).empty())
+	{
+		const auto &vTeleOuts = Collision()->TeleOuts(Teleport - 1);
+		const int TeleOut = GameWorld()->m_Core.RandomOr0((int)vTeleOuts.size());
+		TeleportTo(vTeleOuts[TeleOut], false, false);
+		return;
+	}
+
+	const int EvilTeleport = Collision()->IsEvilTeleport(MapIndex);
+	if(EvilTeleport > 0 && !Collision()->TeleOuts(EvilTeleport - 1).empty())
+	{
+		const auto &vTeleOuts = Collision()->TeleOuts(EvilTeleport - 1);
+		const int TeleOut = GameWorld()->m_Core.RandomOr0((int)vTeleOuts.size());
+		TeleportTo(vTeleOuts[TeleOut], !g_Config.m_SvOldTeleportHook && !g_Config.m_SvOldTeleportWeapons, !g_Config.m_SvOldTeleportHook && !g_Config.m_SvOldTeleportWeapons);
+		return;
+	}
+
+	if(Collision()->IsCheckEvilTeleport(MapIndex))
+	{
+		for(int k = m_TeleCheckpoint - 1; k >= 0; k--)
+		{
+			if(Collision()->TeleCheckOuts(k).empty())
+				continue;
+			const auto &vTeleCheckOuts = Collision()->TeleCheckOuts(k);
+			const int TeleOut = GameWorld()->m_Core.RandomOr0((int)vTeleCheckOuts.size());
+			TeleportTo(vTeleCheckOuts[TeleOut], true, true);
+			return;
+		}
+		return;
+	}
+
+	if(Collision()->IsCheckTeleport(MapIndex))
+	{
+		for(int k = m_TeleCheckpoint - 1; k >= 0; k--)
+		{
+			if(Collision()->TeleCheckOuts(k).empty())
+				continue;
+			const auto &vTeleCheckOuts = Collision()->TeleCheckOuts(k);
+			const int TeleOut = GameWorld()->m_Core.RandomOr0((int)vTeleCheckOuts.size());
+			TeleportTo(vTeleCheckOuts[TeleOut], false, false);
+			return;
+		}
+		return;
+	}
 }
 
 void CCharacter::HandleTuneLayer()
@@ -1199,8 +1293,8 @@ bool CCharacter::Unfreeze()
 {
 	if(m_FreezeTime > 0)
 	{
-		if(!m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_Got)
-			m_Core.m_ActiveWeapon = WEAPON_GUN;
+		if(!IsValidWeaponIndex(m_Core.m_ActiveWeapon) || !m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_Got)
+			m_Core.m_ActiveWeapon = FindFirstOwnedWeapon(m_Core);
 		m_FreezeTime = 0;
 		m_Core.m_FreezeStart = 0;
 		m_Core.m_FreezeEnd = m_Core.m_DeepFrozen ? -1 : 0;
@@ -1392,7 +1486,7 @@ void CCharacter::Read(CNetObj_Character *pChar, CNetObj_DDNetCharacter *pExtende
 		// remove weapons that are unavailable. if the current weapon is ninja just set ammo to zero in case the player is frozen
 		if(pChar->m_Weapon != m_Core.m_ActiveWeapon)
 		{
-			if(pChar->m_Weapon == WEAPON_NINJA)
+			if(pChar->m_Weapon == WEAPON_NINJA && IsValidWeaponIndex(m_Core.m_ActiveWeapon))
 				m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_Ammo = 0;
 			else
 			{
@@ -1402,7 +1496,7 @@ void CCharacter::Read(CNetObj_Character *pChar, CNetObj_DDNetCharacter *pExtende
 					SetNinjaActivationTick(-500);
 					SetNinjaCurrentMoveTime(0);
 				}
-				if(pChar->m_Weapon == m_LastSnapWeapon)
+				if(pChar->m_Weapon == m_LastSnapWeapon && IsValidWeaponIndex(m_Core.m_ActiveWeapon))
 					m_Core.m_aWeapons[m_Core.m_ActiveWeapon].m_Got = false;
 			}
 		}
@@ -1511,7 +1605,7 @@ void CCharacter::Read(CNetObj_Character *pChar, CNetObj_DDNetCharacter *pExtende
 
 	// in most cases the reload timer can be determined from the last attack tick
 	// (this is only needed for autofire weapons to prevent the predicted reload timer from desyncing)
-	if(IsLocal && m_Core.m_ActiveWeapon != WEAPON_HAMMER && !m_Core.m_aWeapons[WEAPON_NINJA].m_Got)
+	if(IsLocal && IsValidWeaponIndex(m_Core.m_ActiveWeapon) && m_Core.m_ActiveWeapon != WEAPON_HAMMER && !m_Core.m_aWeapons[WEAPON_NINJA].m_Got)
 	{
 		if(maximum(m_LastTuneZoneTick, m_LastWeaponSwitchTick) + GameWorld()->GameTickSpeed() < GameWorld()->GameTick())
 		{

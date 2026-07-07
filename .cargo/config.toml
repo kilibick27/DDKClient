@@ -1,5 +1,2 @@
-[net]
-git-fetch-with-cli = true
-
-[http]
-check-revoke = false
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static"]

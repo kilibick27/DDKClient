@@ -9,8 +9,6 @@
 #include <engine/client.h>
 #include <engine/shared/config.h>
 
-#include <cmath>
-
 #include <generated/protocol.h>
 
 #include <game/client/components/camera.h>
@@ -19,16 +17,22 @@
 #include <game/client/components/scoreboard.h>
 #include <game/client/gameclient.h>
 #include <game/collision.h>
+#include <game/gamecore.h>
+
+#include <cmath>
 
 CControls::CControls()
 {
 	mem_zero(&m_aLastData, sizeof(m_aLastData));
+	mem_zero(m_aSnapTapAppliedDirection, sizeof(m_aSnapTapAppliedDirection));
+	mem_zero(m_aSnapTapLastPressedDirection, sizeof(m_aSnapTapLastPressedDirection));
+	mem_zero(m_aSnapTapLastPressedTime, sizeof(m_aSnapTapLastPressedTime));
+	mem_zero(m_aSnapTapPrevLeft, sizeof(m_aSnapTapPrevLeft));
+	mem_zero(m_aSnapTapPrevRight, sizeof(m_aSnapTapPrevRight));
 	std::fill(std::begin(m_aMousePos), std::end(m_aMousePos), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMousePosOnAction), std::end(m_aMousePosOnAction), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aTargetPos), std::end(m_aTargetPos), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMouseInputType), std::end(m_aMouseInputType), EMouseInputType::ABSOLUTE);
-	std::fill(std::begin(m_aStopMovementTicks), std::end(m_aStopMovementTicks), 0);
-	std::fill(std::begin(m_aStopMovementDirection), std::end(m_aStopMovementDirection), 0);
 	m_AutoFollowTargetId = -1;
 	m_DummyAutoHookTargetId = -1;
 }
@@ -52,10 +56,16 @@ void CControls::ResetInput(int Dummy)
 		m_aLastData[Dummy].m_Fire++;
 	m_aLastData[Dummy].m_Fire &= INPUT_STATE_MASK;
 	m_aLastData[Dummy].m_Jump = 0;
+	m_aLastData[Dummy].m_Hook = 0;
 	m_aInputData[Dummy] = m_aLastData[Dummy];
 
 	m_aInputDirectionLeft[Dummy] = 0;
 	m_aInputDirectionRight[Dummy] = 0;
+	m_aSnapTapAppliedDirection[Dummy] = 0;
+	m_aSnapTapLastPressedDirection[Dummy] = 0;
+	m_aSnapTapLastPressedTime[Dummy] = 0;
+	m_aSnapTapPrevLeft[Dummy] = 0;
+	m_aSnapTapPrevRight[Dummy] = 0;
 }
 
 void CControls::OnPlayerDeath()
@@ -173,39 +183,6 @@ void CControls::OnConsoleInit()
 		static CInputSet s_Set = {this, {&m_aInputData[0].m_PrevWeapon, &m_aInputData[1].m_PrevWeapon}, 0};
 		Console()->Register("+prevweapon", "", CFGFLAG_CLIENT, ConKeyInputNextPrevWeapon, &s_Set, "Switch to previous weapon");
 	}
-	
-	// Stop movement command
-	Console()->Register("stop_movement", "", CFGFLAG_CLIENT, ConStopMovement, this, "Stop horizontal movement instantly");
-}
-
-void CControls::ConStopMovement(IConsole::IResult *pResult, void *pUserData)
-{
-	CControls *pControls = (CControls *)pUserData;
-	CGameClient *pGameClient = pControls->GameClient();
-	
-	// Get current character velocity to determine braking direction
-	if(pGameClient->m_Snap.m_pLocalCharacter)
-	{
-		// Get velocity from character
-		int VelX = pGameClient->m_Snap.m_pLocalCharacter->m_VelX;
-		
-		// Determine braking direction based on velocity
-		if(VelX > 256) // Moving right (256 = minimum velocity to brake)
-		{
-			pControls->m_aStopMovementDirection[g_Config.m_ClDummy] = -1; // Brake left
-			pControls->m_aStopMovementTicks[g_Config.m_ClDummy] = 3; // Brake for 3 ticks
-		}
-		else if(VelX < -256) // Moving left
-		{
-			pControls->m_aStopMovementDirection[g_Config.m_ClDummy] = 1; // Brake right
-			pControls->m_aStopMovementTicks[g_Config.m_ClDummy] = 3; // Brake for 3 ticks
-		}
-		else
-		{
-			// Already stopped or moving too slow
-			pControls->m_aInputData[g_Config.m_ClDummy].m_Direction = 0;
-		}
-	}
 }
 
 void CControls::OnMessage(int Msg, void *pRawMsg)
@@ -220,8 +197,113 @@ void CControls::OnMessage(int Msg, void *pRawMsg)
 	}
 }
 
+bool CControls::IsSnapTapActive() const
+{
+	return g_Config.m_BcSnapTap != 0 &&
+		!GameClient()->IsSnapTapBlockedByCommunity();
+}
+
+bool CControls::UseGammaInputMovement() const
+{
+	return false;
+}
+
+void CControls::UpdateSnapTapState(int Dummy, bool LeftPressed, bool RightPressed)
+{
+	const int64_t Now = time_get();
+	if(LeftPressed && !m_aSnapTapPrevLeft[Dummy])
+	{
+		m_aSnapTapLastPressedDirection[Dummy] = -1;
+		m_aSnapTapLastPressedTime[Dummy] = Now;
+	}
+	if(RightPressed && !m_aSnapTapPrevRight[Dummy])
+	{
+		m_aSnapTapLastPressedDirection[Dummy] = 1;
+		m_aSnapTapLastPressedTime[Dummy] = Now;
+	}
+
+	m_aSnapTapPrevLeft[Dummy] = LeftPressed ? 1 : 0;
+	m_aSnapTapPrevRight[Dummy] = RightPressed ? 1 : 0;
+}
+
+int CControls::ResolveMovementDirection(int Dummy, bool LeftPressed, bool RightPressed)
+{
+	UpdateSnapTapState(Dummy, LeftPressed, RightPressed);
+
+	if(IsSnapTapActive() || !UseGammaInputMovement())
+		return ResolveSnapTapDirection(Dummy, LeftPressed, RightPressed);
+
+	int Direction = 0;
+	if(LeftPressed && !RightPressed)
+		Direction = -1;
+	if(!LeftPressed && RightPressed)
+		Direction = 1;
+	return Direction;
+}
+int CControls::ResolveSnapTapDirection(int Dummy, bool LeftPressed, bool RightPressed)
+{
+	if(LeftPressed == RightPressed)
+	{
+		if(!LeftPressed)
+		{
+			m_aSnapTapAppliedDirection[Dummy] = 0;
+			return 0;
+		}
+
+		if(!IsSnapTapActive())
+			return 0;
+
+		int CandidateDirection = m_aSnapTapLastPressedDirection[Dummy];
+		if(CandidateDirection != -1 && CandidateDirection != 1)
+			CandidateDirection = m_aSnapTapAppliedDirection[Dummy] != 0 ? m_aSnapTapAppliedDirection[Dummy] : -1;
+
+		if(m_aSnapTapAppliedDirection[Dummy] == 0)
+		{
+			m_aSnapTapAppliedDirection[Dummy] = CandidateDirection;
+		}
+		else if(m_aSnapTapAppliedDirection[Dummy] != CandidateDirection)
+		{
+			const int64_t Delay = (time_freq() * (int64_t)g_Config.m_BcSnapTapDelay) / 1000;
+			if(time_get() - m_aSnapTapLastPressedTime[Dummy] >= Delay)
+				m_aSnapTapAppliedDirection[Dummy] = CandidateDirection;
+		}
+
+		return m_aSnapTapAppliedDirection[Dummy];
+	}
+
+	m_aSnapTapAppliedDirection[Dummy] = LeftPressed ? -1 : 1;
+	return m_aSnapTapAppliedDirection[Dummy];
+}
+
+void CControls::GoresMode()
+{
+	// if turning off kog mode and it was on before, rebind to previous bind
+	if(!GameClient()->m_Snap.m_pLocalCharacter)
+		return;
+	if(!g_Config.m_BcGoresMode || GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_GAMEPLAY_GORES_MODE))
+		return;
+
+	CCharacterCore Core = GameClient()->m_PredictedPrevChar;
+
+	if(g_Config.m_BcGoresModeDisableIfWeapons)
+	{
+		if(Core.m_aWeapons[WEAPON_GRENADE].m_Got || Core.m_aWeapons[WEAPON_LASER].m_Got || Core.m_aWeapons[WEAPON_SHOTGUN].m_Got)
+			m_WeaponsGot = true;
+		if((!Core.m_aWeapons[WEAPON_GRENADE].m_Got && !Core.m_aWeapons[WEAPON_LASER].m_Got && !Core.m_aWeapons[WEAPON_SHOTGUN].m_Got) && m_WeaponsGot)
+			m_WeaponsGot = false;
+
+		if(m_WeaponsGot)
+			return;
+	}
+
+	if(GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == 0)
+		GameClient()->m_Controls.m_aInputData[g_Config.m_ClDummy].m_WantedWeapon = WEAPON_GUN + 1;
+}
+
 int CControls::SnapInput(int *pData)
 {
+	GoresMode();
+
 	// update player state
 	if(GameClient()->m_Chat.IsActive())
 		m_aInputData[g_Config.m_ClDummy].m_PlayerFlags = PLAYERFLAG_CHATTING;
@@ -254,6 +336,10 @@ int CControls::SnapInput(int *pData)
 
 	// TClient
 	if(g_Config.m_TcHideChatBubbles && Client()->RconAuthed())
+		for(auto &InputData : m_aInputData)
+			InputData.m_PlayerFlags &= ~PLAYERFLAG_CHATTING;
+
+	if(g_Config.m_BcSilentTyping)
 		for(auto &InputData : m_aInputData)
 			InputData.m_PlayerFlags &= ~PLAYERFLAG_CHATTING;
 
@@ -318,6 +404,11 @@ int CControls::SnapInput(int *pData)
 		if(!m_aInputData[g_Config.m_ClDummy].m_TargetX && !m_aInputData[g_Config.m_ClDummy].m_TargetY)
 			m_aInputData[g_Config.m_ClDummy].m_TargetX = 1;
 
+		// set direction
+		const bool LeftPressed = m_aInputDirectionLeft[g_Config.m_ClDummy] != 0;
+		const bool RightPressed = m_aInputDirectionRight[g_Config.m_ClDummy] != 0;
+		m_aInputData[g_Config.m_ClDummy].m_Direction = ResolveMovementDirection(g_Config.m_ClDummy, LeftPressed, RightPressed);
+
 		// Auto aim hook to nearest player
 		if(g_Config.m_ClAutoAim && m_aInputData[g_Config.m_ClDummy].m_Hook)
 		{
@@ -326,44 +417,29 @@ int CControls::SnapInput(int *pData)
 			{
 				vec2 LocalPos = GameClient()->m_LocalCharacterPos;
 				vec2 AimDir = normalize(vec2(m_aInputData[g_Config.m_ClDummy].m_TargetX, m_aInputData[g_Config.m_ClDummy].m_TargetY));
-				
+
 				float MinDistance = -1.0f;
 				vec2 BestTarget;
 				bool FoundTarget = false;
-				
-				// Get local player DDRace team
-				int LocalTeam = GameClient()->m_Teams.Team(LocalClientId);
-				
+
 				const float MaxHookRange = 375.0f;
-				const float MaxAngle = 90.0f * 3.14159f / 180.0f; // 90 degrees in radians
-				
-				// Find nearest player within 90 degree cone
+				const float MaxAngle = 90.0f * 3.14159f / 180.0f;
+
 				for(int i = 0; i < MAX_CLIENTS; i++)
 				{
 					if(i == LocalClientId)
 						continue;
-					
-					const CNetObj_Character *pChar = &GameClient()->m_Snap.m_aCharacters[i].m_Cur;
-					if(!pChar)
+					if(!GameClient()->m_Snap.m_aCharacters[i].m_Active)
 						continue;
-					
-					// Only hook players in the SAME DDRace team
-					int OtherTeam = GameClient()->m_Teams.Team(i);
-					if(OtherTeam != LocalTeam)
-						continue;
-					
-					vec2 OtherPos = vec2(pChar->m_X, pChar->m_Y);
+					const CNetObj_Character &Char = GameClient()->m_Snap.m_aCharacters[i].m_Cur;
+					vec2 OtherPos = vec2(Char.m_X, Char.m_Y);
 					vec2 ToTarget = OtherPos - LocalPos;
 					float Distance = length(ToTarget);
-					
 					if(Distance > MaxHookRange || Distance < 1.0f)
 						continue;
-					
-					// Check if target is within 90 degree cone
 					vec2 ToTargetNorm = normalize(ToTarget);
 					float DotProduct = dot(AimDir, ToTargetNorm);
 					float Angle = std::acos(std::clamp(DotProduct, -1.0f, 1.0f));
-					
 					if(Angle <= MaxAngle && (MinDistance < 0.0f || Distance < MinDistance))
 					{
 						MinDistance = Distance;
@@ -371,8 +447,6 @@ int CControls::SnapInput(int *pData)
 						FoundTarget = true;
 					}
 				}
-				
-				// Apply auto aim if target found
 				if(FoundTarget)
 				{
 					m_aInputData[g_Config.m_ClDummy].m_TargetX = (int)BestTarget.x;
@@ -380,13 +454,6 @@ int CControls::SnapInput(int *pData)
 				}
 			}
 		}
-
-		// set direction
-		m_aInputData[g_Config.m_ClDummy].m_Direction = 0;
-		if(m_aInputDirectionLeft[g_Config.m_ClDummy] && !m_aInputDirectionRight[g_Config.m_ClDummy])
-			m_aInputData[g_Config.m_ClDummy].m_Direction = -1;
-		if(!m_aInputDirectionLeft[g_Config.m_ClDummy] && m_aInputDirectionRight[g_Config.m_ClDummy])
-			m_aInputData[g_Config.m_ClDummy].m_Direction = 1;
 
 		// Auto follow nearest tee
 		if(g_Config.m_ClAutoFollow)
@@ -397,25 +464,19 @@ int CControls::SnapInput(int *pData)
 				vec2 LocalPos = GameClient()->m_LocalCharacterPos;
 				float MinDistance = -1.0f;
 				int NearestId = -1;
-				
-				// Find nearest tee
+
 				for(int i = 0; i < MAX_CLIENTS; i++)
 				{
 					if(i == LocalClientId)
 						continue;
-						
-					const CNetObj_Character *pChar = &GameClient()->m_Snap.m_aCharacters[i].m_Cur;
-					const CNetObj_Character *pPrevChar = &GameClient()->m_Snap.m_aCharacters[i].m_Prev;
-					
-					if(!pChar || !pPrevChar)
+					if(!GameClient()->m_Snap.m_aCharacters[i].m_Active)
 						continue;
-					
+					const CNetObj_Character &Char = GameClient()->m_Snap.m_aCharacters[i].m_Cur;
+					const CNetObj_Character &PrevChar = GameClient()->m_Snap.m_aCharacters[i].m_Prev;
 					vec2 OtherPos = mix(
-						vec2(pPrevChar->m_X, pPrevChar->m_Y),
-						vec2(pChar->m_X, pChar->m_Y),
-						Client()->IntraGameTick(g_Config.m_ClDummy)
-					);
-					
+						vec2(PrevChar.m_X, PrevChar.m_Y),
+						vec2(Char.m_X, Char.m_Y),
+						Client()->IntraGameTick(g_Config.m_ClDummy));
 					float Distance = distance(LocalPos, OtherPos);
 					if(MinDistance < 0.0f || Distance < MinDistance)
 					{
@@ -423,58 +484,30 @@ int CControls::SnapInput(int *pData)
 						NearestId = i;
 					}
 				}
-				
-				// Follow nearest tee
 				if(NearestId >= 0)
 				{
 					m_AutoFollowTargetId = NearestId;
-					
-					const CNetObj_Character *pTargetChar = &GameClient()->m_Snap.m_aCharacters[NearestId].m_Cur;
-					const CNetObj_Character *pTargetPrevChar = &GameClient()->m_Snap.m_aCharacters[NearestId].m_Prev;
-					
+					const CNetObj_Character &TargetChar = GameClient()->m_Snap.m_aCharacters[NearestId].m_Cur;
+					const CNetObj_Character &TargetPrevChar = GameClient()->m_Snap.m_aCharacters[NearestId].m_Prev;
 					vec2 TargetPos = mix(
-						vec2(pTargetPrevChar->m_X, pTargetPrevChar->m_Y),
-						vec2(pTargetChar->m_X, pTargetChar->m_Y),
-						Client()->IntraGameTick(g_Config.m_ClDummy)
-					);
-					
-					// Calculate difference
+						vec2(TargetPrevChar.m_X, TargetPrevChar.m_Y),
+						vec2(TargetChar.m_X, TargetChar.m_Y),
+						Client()->IntraGameTick(g_Config.m_ClDummy));
 					float XDiff = TargetPos.x - LocalPos.x;
 					float YDiff = TargetPos.y - LocalPos.y;
-					
 					const float AlignmentThreshold = 0.03f;
-					
-					// Auto-correct X position
 					if(std::abs(XDiff) > AlignmentThreshold)
-					{
-						if(XDiff > 0)
-							m_aInputData[g_Config.m_ClDummy].m_Direction = 1; // Move right
-						else
-							m_aInputData[g_Config.m_ClDummy].m_Direction = -1; // Move left
-					}
+						m_aInputData[g_Config.m_ClDummy].m_Direction = (XDiff > 0) ? 1 : -1;
 					else
-					{
-						m_aInputData[g_Config.m_ClDummy].m_Direction = 0; // Aligned
-					}
-					
-					// Auto-correct Y position (jump if target is above)
-					if(YDiff < -32.0f && std::abs(XDiff) <= AlignmentThreshold * 10.0f) // Target is above and X is close
-					{
+						m_aInputData[g_Config.m_ClDummy].m_Direction = 0;
+					if(YDiff < -32.0f && std::abs(XDiff) <= AlignmentThreshold * 10.0f)
 						m_aInputData[g_Config.m_ClDummy].m_Jump = 1;
-					}
 				}
 			}
 		}
 		else
 		{
 			m_AutoFollowTargetId = -1;
-		}
-
-		// Active braking for stop_movement command
-		if(m_aStopMovementTicks[g_Config.m_ClDummy] > 0)
-		{
-			m_aInputData[g_Config.m_ClDummy].m_Direction = m_aStopMovementDirection[g_Config.m_ClDummy];
-			m_aStopMovementTicks[g_Config.m_ClDummy]--;
 		}
 
 		// dummy copy moves
@@ -486,91 +519,58 @@ int CControls::SnapInput(int *pData)
 			if(!GameClient()->m_Snap.m_SpecInfo.m_Active || GameClient()->m_Snap.m_SpecInfo.m_SpectatorId < 0)
 			{
 				pDummyInput->m_Direction = m_aInputData[g_Config.m_ClDummy].m_Direction;
-				// Only copy hook and jump if old copy is enabled
 				if(g_Config.m_ClDummyCopyMoves)
 				{
 					pDummyInput->m_Hook = m_aInputData[g_Config.m_ClDummy].m_Hook;
 					pDummyInput->m_Jump = m_aInputData[g_Config.m_ClDummy].m_Jump;
 				}
-				// New copy mode copies jump but not hook
 				else if(g_Config.m_ClDummyCopyMovesWithHammer)
 				{
 					pDummyInput->m_Jump = m_aInputData[g_Config.m_ClDummy].m_Jump;
 				}
-				
-				// Auto hook nearest tee if enabled and main player is hooking
-				// Only works with old copy or both copies enabled (not with new copy only)
-				if(g_Config.m_ClDummyAutoHook && m_aInputData[g_Config.m_ClDummy].m_Hook && 
-				   g_Config.m_ClDummyCopyMoves) // Must have old copy enabled
+
+				// Auto hook nearest tee (only with old copy moves enabled)
+				if(g_Config.m_ClDummyAutoHook && m_aInputData[g_Config.m_ClDummy].m_Hook && g_Config.m_ClDummyCopyMoves)
 				{
 					int DummyId = GameClient()->m_aLocalIds[!g_Config.m_ClDummy];
 					int LocalClientId = GameClient()->m_Snap.m_LocalClientId;
-					
 					if(DummyId >= 0 && LocalClientId >= 0)
 					{
-						const CNetObj_Character *pDummyChar = &GameClient()->m_Snap.m_aCharacters[DummyId].m_Cur;
-						
-						if(pDummyChar)
+						if(GameClient()->m_Snap.m_aCharacters[DummyId].m_Active)
 						{
-							vec2 DummyPos = vec2(pDummyChar->m_X, pDummyChar->m_Y);
-							
-							// Get local player DDRace team
-							int LocalTeam = GameClient()->m_Teams.Team(LocalClientId);
+							const CNetObj_Character &DummyChar = GameClient()->m_Snap.m_aCharacters[DummyId].m_Cur;
+							vec2 DummyPos = vec2(DummyChar.m_X, DummyChar.m_Y);
 							const float MaxHookRange = 375.0f;
-							
-							// If no target is remembered, find nearest one
 							if(m_DummyAutoHookTargetId < 0)
 							{
 								float MinDistance = -1.0f;
 								int BestTargetId = -1;
-								
-								// Find nearest tee to dummy (only same DDRace team)
 								for(int i = 0; i < MAX_CLIENTS; i++)
 								{
 									if(i == DummyId || i == LocalClientId)
 										continue;
-										
-									const CNetObj_Character *pChar = &GameClient()->m_Snap.m_aCharacters[i].m_Cur;
-									
-									if(!pChar)
+									if(!GameClient()->m_Snap.m_aCharacters[i].m_Active)
 										continue;
-									
-									// Only hook players in the SAME DDRace team
-									int OtherTeam = GameClient()->m_Teams.Team(i);
-									if(OtherTeam != LocalTeam)
-										continue; // Skip if not in same team
-									
-									vec2 OtherPos = vec2(pChar->m_X, pChar->m_Y);
+									const CNetObj_Character &OtherChar = GameClient()->m_Snap.m_aCharacters[i].m_Cur;
+									vec2 OtherPos = vec2(OtherChar.m_X, OtherChar.m_Y);
 									float Distance = distance(DummyPos, OtherPos);
-									
 									if(Distance <= MaxHookRange && (MinDistance < 0.0f || Distance < MinDistance))
 									{
 										MinDistance = Distance;
 										BestTargetId = i;
 									}
 								}
-								
-								// Remember the target
 								m_DummyAutoHookTargetId = BestTargetId;
 							}
-							
-							// Hook the remembered target if it exists
 							if(m_DummyAutoHookTargetId >= 0 && m_DummyAutoHookTargetId < MAX_CLIENTS)
 							{
-								const CNetObj_Character *pTargetChar = &GameClient()->m_Snap.m_aCharacters[m_DummyAutoHookTargetId].m_Cur;
-								
-								// Check if target still exists and is in range
-								if(pTargetChar)
+								if(GameClient()->m_Snap.m_aCharacters[m_DummyAutoHookTargetId].m_Active)
 								{
-									vec2 TargetPos = vec2(pTargetChar->m_X, pTargetChar->m_Y);
+									const CNetObj_Character &TargetChar = GameClient()->m_Snap.m_aCharacters[m_DummyAutoHookTargetId].m_Cur;
+									vec2 TargetPos = vec2(TargetChar.m_X, TargetChar.m_Y);
 									float Distance = distance(DummyPos, TargetPos);
-									
-									// Check if target is still in same team
-									int TargetTeam = GameClient()->m_Teams.Team(m_DummyAutoHookTargetId);
-									
-									if(Distance <= MaxHookRange && TargetTeam == LocalTeam)
+									if(Distance <= MaxHookRange)
 									{
-										// Hook the remembered target
 										pDummyInput->m_Hook = 1;
 										vec2 HookDir = TargetPos - DummyPos;
 										pDummyInput->m_TargetX = (int)HookDir.x;
@@ -578,9 +578,7 @@ int CControls::SnapInput(int *pData)
 									}
 									else
 									{
-										// Target out of range or changed team, forget it
 										m_DummyAutoHookTargetId = -1;
-										// Copy main player's hook and aim
 										pDummyInput->m_Hook = m_aInputData[g_Config.m_ClDummy].m_Hook;
 										pDummyInput->m_TargetX = m_aInputData[g_Config.m_ClDummy].m_TargetX;
 										pDummyInput->m_TargetY = m_aInputData[g_Config.m_ClDummy].m_TargetY;
@@ -588,9 +586,7 @@ int CControls::SnapInput(int *pData)
 								}
 								else
 								{
-									// Target doesn't exist anymore, forget it
 									m_DummyAutoHookTargetId = -1;
-									// Copy main player's hook and aim
 									pDummyInput->m_Hook = m_aInputData[g_Config.m_ClDummy].m_Hook;
 									pDummyInput->m_TargetX = m_aInputData[g_Config.m_ClDummy].m_TargetX;
 									pDummyInput->m_TargetY = m_aInputData[g_Config.m_ClDummy].m_TargetY;
@@ -598,7 +594,6 @@ int CControls::SnapInput(int *pData)
 							}
 							else
 							{
-								// No target found, copy main player's hook and aim
 								pDummyInput->m_Hook = m_aInputData[g_Config.m_ClDummy].m_Hook;
 								pDummyInput->m_TargetX = m_aInputData[g_Config.m_ClDummy].m_TargetX;
 								pDummyInput->m_TargetY = m_aInputData[g_Config.m_ClDummy].m_TargetY;
@@ -608,24 +603,18 @@ int CControls::SnapInput(int *pData)
 				}
 				else
 				{
-					// Auto hook is disabled, forget the target
 					m_DummyAutoHookTargetId = -1;
 				}
-				
+
 				pDummyInput->m_PlayerFlags = m_aInputData[g_Config.m_ClDummy].m_PlayerFlags;
-				
-				// Copy target only if auto hook is disabled or didn't find a target
 				if(!g_Config.m_ClDummyAutoHook || !g_Config.m_ClDummyCopyMoves)
 				{
 					pDummyInput->m_TargetX = m_aInputData[g_Config.m_ClDummy].m_TargetX;
 					pDummyInput->m_TargetY = m_aInputData[g_Config.m_ClDummy].m_TargetY;
 				}
-				
 				pDummyInput->m_WantedWeapon = m_aInputData[g_Config.m_ClDummy].m_WantedWeapon;
-
 				if(!g_Config.m_ClDummyControl)
 					pDummyInput->m_Fire += m_aInputData[g_Config.m_ClDummy].m_Fire - m_aLastData[g_Config.m_ClDummy].m_Fire;
-
 				pDummyInput->m_NextWeapon += m_aInputData[g_Config.m_ClDummy].m_NextWeapon - m_aLastData[g_Config.m_ClDummy].m_NextWeapon;
 				pDummyInput->m_PrevWeapon += m_aInputData[g_Config.m_ClDummy].m_PrevWeapon - m_aLastData[g_Config.m_ClDummy].m_PrevWeapon;
 			}
@@ -644,6 +633,48 @@ int CControls::SnapInput(int *pData)
 				pDummyInput->m_Fire++;
 
 			pDummyInput->m_Hook = g_Config.m_ClDummyHook;
+		}
+
+		// DDK: Auto Follow Nearest — move dummy X toward nearest player
+		if(g_Config.m_DdkAutoFollowNearest && Client()->DummyConnected())
+		{
+			const int DummyId = GameClient()->m_aLocalIds[!g_Config.m_ClDummy];
+			const int LocalId = GameClient()->m_Snap.m_LocalClientId;
+
+			if(DummyId >= 0 && GameClient()->m_Snap.m_aCharacters[DummyId].m_Active)
+			{
+				const float DummyX = GameClient()->m_Snap.m_aCharacters[DummyId].m_Cur.m_X;
+
+				// Find nearest other player by X distance
+				float MinDist = -1.0f;
+				float TargetX = DummyX;
+				for(int i = 0; i < MAX_CLIENTS; ++i)
+				{
+					if(i == DummyId || i == LocalId)
+						continue;
+					if(!GameClient()->m_Snap.m_aCharacters[i].m_Active)
+						continue;
+					const float OtherX = GameClient()->m_Snap.m_aCharacters[i].m_Cur.m_X;
+					const float Dist = absolute(OtherX - DummyX);
+					if(MinDist < 0.0f || Dist < MinDist)
+					{
+						MinDist = Dist;
+						TargetX = OtherX;
+					}
+				}
+
+				if(MinDist >= 0.0f)
+				{
+					const float Diff = TargetX - DummyX;
+					CNetObj_PlayerInput *pDummyInput = &GameClient()->m_DummyInput;
+					if(Diff > 3.0f)
+						pDummyInput->m_Direction = 1;
+					else if(Diff < -3.0f)
+						pDummyInput->m_Direction = -1;
+					else
+						pDummyInput->m_Direction = 0;
+				}
+			}
 		}
 
 		// stress testing
@@ -830,17 +861,51 @@ float CControls::GetMaxMouseDistance() const
 
 bool CControls::CheckNewInput()
 {
+	if(g_Config.m_TcFastInput && g_Config.m_BcFastInputMode == 4 && g_Config.m_BcSaikoPlusAmount > 0)
+	{
+		CNetObj_PlayerInput TestInput = m_aInputData[g_Config.m_ClDummy];
+		TestInput.m_Direction = 0;
+		if(m_aInputDirectionLeft[g_Config.m_ClDummy] && !m_aInputDirectionRight[g_Config.m_ClDummy])
+			TestInput.m_Direction = -1;
+		if(!m_aInputDirectionLeft[g_Config.m_ClDummy] && m_aInputDirectionRight[g_Config.m_ClDummy])
+			TestInput.m_Direction = 1;
+
+		bool NewInput = false;
+		if(m_aFastInput[g_Config.m_ClDummy].m_Direction != TestInput.m_Direction)
+			NewInput = true;
+		if(m_aFastInput[g_Config.m_ClDummy].m_Hook != TestInput.m_Hook)
+			NewInput = true;
+		if(m_aFastInput[g_Config.m_ClDummy].m_Fire != TestInput.m_Fire)
+			NewInput = true;
+		if(m_aFastInput[g_Config.m_ClDummy].m_Jump != TestInput.m_Jump)
+			NewInput = true;
+		if(m_aFastInput[g_Config.m_ClDummy].m_NextWeapon != TestInput.m_NextWeapon)
+			NewInput = true;
+		if(m_aFastInput[g_Config.m_ClDummy].m_PrevWeapon != TestInput.m_PrevWeapon)
+			NewInput = true;
+		if(m_aFastInput[g_Config.m_ClDummy].m_WantedWeapon != TestInput.m_WantedWeapon)
+			NewInput = true;
+
+		if(g_Config.m_ClSubTickAiming)
+		{
+			TestInput.m_TargetX = (int)m_aMousePos[g_Config.m_ClDummy].x;
+			TestInput.m_TargetY = (int)m_aMousePos[g_Config.m_ClDummy].y;
+		}
+
+		m_aFastInput[g_Config.m_ClDummy] = TestInput;
+
+		return NewInput;
+	}
+
 	bool NewInput[2] = {};
 	for(int Dummy = 0; Dummy < NUM_DUMMIES; Dummy++)
 	{
 		CNetObj_PlayerInput TestInput = m_aInputData[Dummy];
 		if(Dummy == g_Config.m_ClDummy)
 		{
-			TestInput.m_Direction = 0;
-			if(m_aInputDirectionLeft[Dummy] && !m_aInputDirectionRight[Dummy])
-				TestInput.m_Direction = -1;
-			if(!m_aInputDirectionLeft[Dummy] && m_aInputDirectionRight[Dummy])
-				TestInput.m_Direction = 1;
+			const bool LeftPressed = m_aInputDirectionLeft[Dummy] != 0;
+			const bool RightPressed = m_aInputDirectionRight[Dummy] != 0;
+			TestInput.m_Direction = ResolveMovementDirection(Dummy, LeftPressed, RightPressed);
 		}
 
 		if(m_aFastInput[Dummy].m_Direction != TestInput.m_Direction)

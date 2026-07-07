@@ -44,15 +44,13 @@ public:
 	CNetObj_PlayerInput m_aFastInput[NUM_DUMMIES];
 	bool m_FastInputHookAction = false;
 	bool m_FastInputFireAction = false;
-	
-	// Active braking
-	int m_aStopMovementTicks[NUM_DUMMIES];
-	int m_aStopMovementDirection[NUM_DUMMIES];
-	
-	// Auto follow
+	bool m_WeaponsGot = false;
+	int m_aSnapTapAppliedDirection[NUM_DUMMIES];
+	int m_aSnapTapLastPressedDirection[NUM_DUMMIES];
+	int64_t m_aSnapTapLastPressedTime[NUM_DUMMIES];
+	int m_aSnapTapPrevLeft[NUM_DUMMIES];
+	int m_aSnapTapPrevRight[NUM_DUMMIES];
 	int m_AutoFollowTargetId;
-	
-	// Dummy auto hook target
 	int m_DummyAutoHookTargetId;
 
 	CControls();
@@ -69,12 +67,17 @@ public:
 	void ClampMousePos();
 	void ResetInput(int Dummy);
 	bool CheckNewInput();
+	void GoresMode();
 
-private:
+	private:
+		bool UseGammaInputMovement() const;
+		void UpdateSnapTapState(int Dummy, bool LeftPressed, bool RightPressed);
+		int ResolveMovementDirection(int Dummy, bool LeftPressed, bool RightPressed);
+		int ResolveSnapTapDirection(int Dummy, bool LeftPressed, bool RightPressed);
+		bool IsSnapTapActive() const;
 	static void ConKeyInputState(IConsole::IResult *pResult, void *pUserData);
 	static void ConKeyInputCounter(IConsole::IResult *pResult, void *pUserData);
 	static void ConKeyInputSet(IConsole::IResult *pResult, void *pUserData);
 	static void ConKeyInputNextPrevWeapon(IConsole::IResult *pResult, void *pUserData);
-	static void ConStopMovement(IConsole::IResult *pResult, void *pUserData);
 };
 #endif

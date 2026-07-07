@@ -43,7 +43,10 @@ void CMenus::RenderGame(CUIRect MainView)
 {
 	CUIRect Button, ButtonBars, ButtonBar, ButtonBar2;
 	bool ShowDDRaceButtons = MainView.w > 855.0f;
-	MainView.HSplitTop(45.0f + (g_Config.m_ClTouchControls ? 35.0f : 0.0f), &ButtonBars, &MainView);
+	const bool ShowEscPlayersCarousel = g_Config.m_BcEscPlayerList != 0 && (!g_Config.m_ClTouchControls || !GameClient()->m_TouchControls.IsEditingActive());
+	const float ButtonRowsHeight = 45.0f + (g_Config.m_ClTouchControls ? 35.0f : 0.0f);
+	const float CarouselHeight = ShowEscPlayersCarousel ? 96.0f : 0.0f;
+	MainView.HSplitTop(ButtonRowsHeight + CarouselHeight, &ButtonBars, &MainView);
 	ButtonBars.Draw(ms_ColorTabbarActive, IGraphics::CORNER_B, 10.0f);
 	ButtonBars.Margin(10.0f, &ButtonBars);
 	ButtonBars.HSplitTop(25.0f, &ButtonBar, &ButtonBars);
@@ -216,16 +219,49 @@ void CMenus::RenderGame(CUIRect MainView)
 
 	if(GameClient()->m_ReceivedDDNetPlayer && GameClient()->m_Snap.m_pLocalInfo && (ShowDDRaceButtons || !GameClient()->IsTeamPlay()))
 	{
-		if(GameClient()->m_Snap.m_pLocalInfo->m_Team != TEAM_SPECTATORS || Paused || Spec)
+		const bool ShowJoinGameButton = Paused || Spec;
+		if(ShowJoinGameButton)
 		{
-			ButtonBar.VSplitLeft((!Paused && !Spec) ? 65.0f : 120.0f, &Button, &ButtonBar);
+			ButtonBar.VSplitLeft(120.0f, &Button, &ButtonBar);
 			ButtonBar.VSplitLeft(5.0f, nullptr, &ButtonBar);
 
 			static CButtonContainer s_PauseButton;
-			if(DoButton_Menu(&s_PauseButton, (!Paused && !Spec) ? Localize("Pause") : Localize("Join game"), 0, &Button))
+			if(DoButton_Menu(&s_PauseButton, Localize("Join game"), 0, &Button))
 			{
 				Console()->ExecuteLine("say /pause", IConsole::CLIENT_ID_UNSPECIFIED);
 				SetActive(false);
+			}
+		}
+		else if(GameClient()->m_Snap.m_pLocalInfo->m_Team != TEAM_SPECTATORS)
+		{
+			const bool ShowAutoCameraButton = GameClient()->m_Snap.m_pLocalInfo && (GameClient()->m_Snap.m_pLocalInfo->m_Team == TEAM_SPECTATORS || Paused || Spec);
+			constexpr float NormalPracticeButtonWidth = 120.0f;
+			constexpr float CompactPracticeButtonWidth = 52.0f;
+			constexpr float PracticeButtonMinWidth = 32.0f;
+			constexpr float ButtonSpacing = 5.0f;
+			const float ReservedWidth = ShowAutoCameraButton ? (32.0f + ButtonSpacing) : 0.0f;
+
+			const bool CompactPractice = ButtonBar.w < NormalPracticeButtonWidth + ButtonSpacing + ReservedWidth;
+			float PracticeButtonWidth = CompactPractice ? CompactPracticeButtonWidth : NormalPracticeButtonWidth;
+			const float MaxPracticeButtonWidth = maximum(0.0f, ButtonBar.w - ReservedWidth);
+			if(MaxPracticeButtonWidth < PracticeButtonMinWidth)
+				PracticeButtonWidth = MaxPracticeButtonWidth;
+			else
+				PracticeButtonWidth = std::clamp(PracticeButtonWidth, PracticeButtonMinWidth, MaxPracticeButtonWidth);
+
+			if(PracticeButtonWidth > 0.0f)
+			{
+				ButtonBar.VSplitLeft(PracticeButtonWidth, &Button, &ButtonBar);
+				if(ButtonBar.w >= ButtonSpacing)
+					ButtonBar.VSplitLeft(ButtonSpacing, nullptr, &ButtonBar);
+
+				static CButtonContainer s_FastPracticeButton;
+				const bool UseCompactLabel = CompactPractice || PracticeButtonWidth <= CompactPracticeButtonWidth;
+				const char *pFastPracticeLabel = UseCompactLabel ? "fp" : (GameClient()->m_FastPractice.Enabled() ? Localize("Stop practice") : Localize("Fast practice"));
+				if(DoButton_Menu(&s_FastPracticeButton, pFastPracticeLabel, GameClient()->m_FastPractice.Enabled() ? 1 : 0, &Button))
+				{
+					Console()->ExecuteLine("fast_practice_toggle", IConsole::CLIENT_ID_UNSPECIFIED);
+				}
 			}
 		}
 	}
@@ -337,6 +373,140 @@ void CMenus::RenderGame(CUIRect MainView)
 			default: dbg_assert_failed("Unknown selected tab value = %d.", (int)m_MenusIngameTouchControls.m_CurrentMenu);
 			}
 		}
+	}
+
+	if(ShowEscPlayersCarousel)
+	{
+		RenderEscPlayersCarousel(ButtonBars);
+	}
+}
+
+void CMenus::RenderEscPlayersCarousel(CUIRect MainView)
+{
+	if(MainView.h <= 6.0f || MainView.w <= 40.0f)
+		return;
+
+	CUIRect Panel = MainView;
+	Panel.HSplitTop(5.0f, nullptr, &Panel);
+
+	int aPlayerIds[MAX_CLIENTS];
+	int NumPlayers = 0;
+	for(const auto &pInfoByName : GameClient()->m_Snap.m_apInfoByName)
+	{
+		if(!pInfoByName)
+			continue;
+
+		const int ClientId = pInfoByName->m_ClientId;
+		if(ClientId < 0 || ClientId >= MAX_CLIENTS || !GameClient()->m_aClients[ClientId].m_Active)
+			continue;
+
+		aPlayerIds[NumPlayers] = ClientId;
+		NumPlayers++;
+	}
+
+	if(NumPlayers == 0)
+	{
+		Ui()->DoLabel(&Panel, Localize("No players"), 10.0f, TEXTALIGN_MC);
+		return;
+	}
+
+	const float ItemWidth = 64.0f;
+	const float ItemSpacing = 0.5f;
+	const float ItemStep = ItemWidth + ItemSpacing;
+	const float ContentWidth = NumPlayers * ItemWidth + maximum(0, NumPlayers - 1) * ItemSpacing;
+	const float MaxScrollPx = maximum(0.0f, ContentWidth - Panel.w);
+	const bool ShowSlider = MaxScrollPx > 0.0f;
+
+	CUIRect NamesRow, SkinsRow;
+	Panel.HSplitTop(18.0f, &NamesRow, &Panel);
+	const float SkinsHeight = ShowSlider ? 52.0f : 70.0f;
+	Panel.HSplitTop(minimum(SkinsHeight, Panel.h), &SkinsRow, &Panel);
+	CUIRect SliderRow;
+	if(ShowSlider)
+	{
+		Panel.HSplitTop(2.0f, nullptr, &Panel);
+		Panel.HSplitTop(minimum(16.0f, Panel.h), &SliderRow, &Panel);
+	}
+	m_EscPlayersCarouselScroll = std::clamp(m_EscPlayersCarouselScroll, 0.0f, 1.0f);
+	if(MaxScrollPx <= 0.0f)
+		m_EscPlayersCarouselScroll = 0.0f;
+
+	const float ScrollStepRel = MaxScrollPx > 0.0f ? std::clamp((ItemStep * 2.0f) / MaxScrollPx, 0.02f, 0.35f) : 0.0f;
+	if(Ui()->MouseInside(&SkinsRow))
+	{
+		if(Input()->KeyPress(KEY_MOUSE_WHEEL_UP))
+			m_EscPlayersCarouselScroll = std::clamp(m_EscPlayersCarouselScroll - ScrollStepRel, 0.0f, 1.0f);
+		if(Input()->KeyPress(KEY_MOUSE_WHEEL_DOWN))
+			m_EscPlayersCarouselScroll = std::clamp(m_EscPlayersCarouselScroll + ScrollStepRel, 0.0f, 1.0f);
+	}
+
+	const float ScrollPx = m_EscPlayersCarouselScroll * MaxScrollPx;
+
+	CUIRect ClipRect = NamesRow;
+	ClipRect.h = (SkinsRow.y + SkinsRow.h) - NamesRow.y;
+	Ui()->ClipEnable(&ClipRect);
+	for(int i = 0; i < NumPlayers; i++)
+	{
+		const int ClientId = aPlayerIds[i];
+		const float ItemX = SkinsRow.x + i * ItemStep - ScrollPx;
+		if(ItemX + ItemWidth <= SkinsRow.x || ItemX >= SkinsRow.x + SkinsRow.w)
+			continue;
+
+		CUIRect NameRect = {ItemX, NamesRow.y, ItemWidth, NamesRow.h};
+		SLabelProperties LabelProps;
+		LabelProps.m_MaxWidth = NameRect.w;
+		LabelProps.m_EllipsisAtEnd = true;
+		char aSanitizedName[MAX_NAME_LENGTH];
+		GameClient()->m_BestClient.SanitizePlayerName(GameClient()->m_aClients[ClientId].m_aName, aSanitizedName, sizeof(aSanitizedName), ClientId, true);
+		Ui()->DoLabel(&NameRect, aSanitizedName, 12.0f, TEXTALIGN_MC, LabelProps);
+
+		CUIRect ItemRect = {ItemX, SkinsRow.y, ItemWidth, SkinsRow.h};
+		CUIRect TeeRect = ItemRect;
+		const float TeeSize = minimum(50.0f, ItemRect.h);
+		TeeRect.w = TeeSize;
+		TeeRect.h = TeeSize;
+		TeeRect.x = ItemRect.x + (ItemRect.w - TeeSize) / 2.0f;
+		TeeRect.y = ItemRect.y + (ItemRect.h - TeeSize) / 2.0f;
+
+		const bool IsLocal =
+			GameClient()->m_aLocalIds[0] == ClientId ||
+			(Client()->DummyConnected() && GameClient()->m_aLocalIds[1] == ClientId);
+
+		CUIRect HoverRect = TeeRect;
+		HoverRect.x -= 2.0f;
+		HoverRect.y -= 2.0f;
+		HoverRect.w += 4.0f;
+		HoverRect.h += 4.0f;
+		const int ButtonResult = Ui()->DoButtonLogic(&m_aEscPlayersCarouselButtons[ClientId], 0, &HoverRect, BUTTONFLAG_LEFT | BUTTONFLAG_RIGHT, CUi::EButtonSoundType::BUTTON);
+		const bool Hot = Ui()->HotItem() == &m_aEscPlayersCarouselButtons[ClientId];
+		if(IsLocal || Hot)
+		{
+			HoverRect.Draw(IsLocal ? ColorRGBA(0.30f, 0.55f, 0.30f, 0.22f) : ColorRGBA(1.0f, 1.0f, 1.0f, 0.10f), IGraphics::CORNER_ALL, HoverRect.h / 2.0f);
+		}
+
+		CTeeRenderInfo TeeInfo = GameClient()->m_aClients[ClientId].m_RenderInfo;
+		if(TeeInfo.Valid())
+		{
+			TeeInfo.m_Size = TeeRect.h;
+			vec2 OffsetToMid;
+			CRenderTools::GetRenderTeeOffsetToRenderedTee(CAnimState::GetIdle(), &TeeInfo, OffsetToMid);
+			const vec2 TeeRenderPos = vec2(TeeRect.Center().x, TeeRect.Center().y + OffsetToMid.y);
+			RenderTools()->RenderTee(CAnimState::GetIdle(), &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), TeeRenderPos);
+		}
+
+		if(ButtonResult != 0)
+		{
+			const CNetObj_PlayerInfo *pPlayerInfo = GameClient()->m_Snap.m_apPlayerInfos[ClientId];
+			const bool IsSpectating = pPlayerInfo && pPlayerInfo->m_Team == TEAM_SPECTATORS;
+			GameClient()->m_Scoreboard.OpenPlayerPopup(ClientId, IsSpectating, Ui()->MouseX(), Ui()->MouseY());
+		}
+	}
+	Ui()->ClipDisable();
+
+	if(ShowSlider)
+	{
+		const float NewRel = Ui()->DoScrollbarH(&m_EscPlayersCarouselSlider, &SliderRow, m_EscPlayersCarouselScroll);
+		m_EscPlayersCarouselScroll = std::clamp(NewRel, 0.0f, 1.0f);
 	}
 }
 
@@ -568,15 +738,20 @@ void CMenus::RenderPlayers(CUIRect MainView)
 		CRenderTools::GetRenderTeeOffsetToRenderedTee(pIdleState, &TeeInfo, OffsetToMid);
 		vec2 TeeRenderPos(Button.x + Button.h / 2, Button.y + Button.h / 2 + OffsetToMid.y);
 		RenderTools()->RenderTee(pIdleState, &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), TeeRenderPos);
-		Ui()->DoButtonLogic(&s_aPlayerIds[Index][3], 0, &Button, BUTTONFLAG_NONE);
+		Ui()->DoButtonLogic(&s_aPlayerIds[Index][3], 0, &Button, BUTTONFLAG_NONE, CUi::EButtonSoundType::SILENT);
 		GameClient()->m_Tooltips.DoToolTip(&s_aPlayerIds[Index][3], &Button, CurrentClient.m_aSkinName);
 
 		Player.HSplitTop(1.5f, nullptr, &Player);
 		Player.VSplitMid(&Player, &Button);
 		Row.VSplitRight(210.0f, &Button2, &Row);
 
-		Ui()->DoLabel(&Player, CurrentClient.m_aName, 14.0f, TEXTALIGN_ML);
-		Ui()->DoLabel(&Button, CurrentClient.m_aClan, 14.0f, TEXTALIGN_ML);
+		char aSanitizedName[MAX_NAME_LENGTH];
+		char aSanitizedClan[MAX_CLAN_LENGTH];
+		GameClient()->m_BestClient.SanitizePlayerName(CurrentClient.m_aName, aSanitizedName, sizeof(aSanitizedName), Index);
+		GameClient()->m_BestClient.SanitizeText(CurrentClient.m_aClan, aSanitizedClan, sizeof(aSanitizedClan));
+
+		Ui()->DoLabel(&Player, aSanitizedName, 14.0f, TEXTALIGN_ML);
+		Ui()->DoLabel(&Button, aSanitizedClan, 14.0f, TEXTALIGN_ML);
 
 		GameClient()->m_CountryFlags.Render(CurrentClient.m_Country, ColorRGBA(1.0f, 1.0f, 1.0f, 0.5f),
 			Button2.x, Button2.y + Button2.h / 2.0f - 0.75f * Button2.h / 2.0f, 1.5f * Button2.h, 0.75f * Button2.h);
@@ -606,7 +781,9 @@ void CMenus::RenderPlayers(CUIRect MainView)
 		Row.VSplitLeft(Width, &Button, &Row);
 		Button.VSplitLeft((Width - Button.h) / 4.0f, nullptr, &Button);
 		Button.VSplitLeft(Button.h, &Button, nullptr);
-		if(DoButton_Toggle(&s_aPlayerIds[Index][2], CurrentClient.m_Friend, &Button, true))
+		if(GameClient()->m_BestClient.HasStreamerFlag(CBestClient::STREAMER_HIDE_FRIEND_WHISPER))
+			DoButton_Toggle(&s_aPlayerIds[Index][2], 0, &Button, false);
+		else if(DoButton_Toggle(&s_aPlayerIds[Index][2], CurrentClient.m_Friend, &Button, true))
 		{
 			if(CurrentClient.m_Friend)
 				GameClient()->Friends()->RemoveFriend(CurrentClient.m_aName, CurrentClient.m_aClan);
@@ -644,11 +821,15 @@ void CMenus::RenderServerInfo(CUIRect MainView)
 
 	ServerInfo.HSplitTop(FontSizeBody, &Label, &ServerInfo);
 	ServerInfo.HSplitTop(FontSizeBody, nullptr, &ServerInfo);
-	Ui()->DoLabel(&Label, CurrentServerInfo.m_aName, FontSizeBody, TEXTALIGN_ML);
+	char aSanitizedServerName[sizeof(CurrentServerInfo.m_aName)];
+	GameClient()->m_BestClient.SanitizeText(CurrentServerInfo.m_aName, aSanitizedServerName, sizeof(aSanitizedServerName));
+	Ui()->DoLabel(&Label, aSanitizedServerName, FontSizeBody, TEXTALIGN_ML);
 
 	ServerInfo.HSplitTop(FontSizeBody, &Label, &ServerInfo);
 	char aBuf[256];
-	str_format(aBuf, sizeof(aBuf), "%s: %s", Localize("Address"), CurrentServerInfo.m_aAddress);
+	char aMaskedAddress[sizeof(CurrentServerInfo.m_aAddress)];
+	GameClient()->m_BestClient.MaskServerAddress(CurrentServerInfo.m_aAddress, aMaskedAddress, sizeof(aMaskedAddress));
+	str_format(aBuf, sizeof(aBuf), "%s: %s", Localize("Address"), aMaskedAddress);
 	Ui()->DoLabel(&Label, aBuf, FontSizeBody, TEXTALIGN_ML);
 
 	if(GameClient()->m_Snap.m_pLocalInfo)
@@ -680,7 +861,7 @@ void CMenus::RenderServerInfo(CUIRect MainView)
 			Label.VSplitLeft(2.0f * Label.h, &Label, nullptr);
 			m_CommunityIcons.Render(pIcon, Label, true);
 			static char s_CommunityTooltipButtonId;
-			Ui()->DoButtonLogic(&s_CommunityTooltipButtonId, 0, &Label, BUTTONFLAG_NONE);
+			Ui()->DoButtonLogic(&s_CommunityTooltipButtonId, 0, &Label, BUTTONFLAG_NONE, CUi::EButtonSoundType::SILENT);
 			GameClient()->m_Tooltips.DoToolTip(&s_CommunityTooltipButtonId, &Label, pCommunity->Name());
 		}
 	}
@@ -694,15 +875,17 @@ void CMenus::RenderServerInfo(CUIRect MainView)
 		if(DoButton_Menu(&s_CopyButton, Localize("Copy info"), 0, &Button))
 		{
 			char aInfo[256];
+			char aSanitizedOwnName[MAX_NAME_LENGTH];
+			GameClient()->m_BestClient.SanitizePlayerName(Client()->PlayerName(), aSanitizedOwnName, sizeof(aSanitizedOwnName), GameClient()->m_aLocalIds[g_Config.m_ClDummy]);
 			str_format(
 				aInfo,
 				sizeof(aInfo),
 				"%s\n"
 				"Address: ddnet://%s\n"
 				"My IGN: %s\n",
-				CurrentServerInfo.m_aName,
-				CurrentServerInfo.m_aAddress,
-				Client()->PlayerName());
+				aSanitizedServerName,
+				aMaskedAddress,
+				aSanitizedOwnName);
 			Input()->SetClipboardText(aInfo);
 		}
 	}

@@ -19,6 +19,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 };
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -33,6 +34,16 @@ static const enum AVColorSpace COLOR_SPACE = AVCOL_SPC_BT709;
 // wants an SWS_CS_* macro. Both sets of constants follow H.273 numbering
 // and hence agree, but we assert that they're equal here to be sure.
 static_assert(COLOR_SPACE == SWS_CS_ITU709);
+
+static int64_t DefaultVideoBitrate(int Width, int Height, int Fps)
+{
+	// This path is used when no libx264 (CRF) encoder is available and we fall back
+	// to a fixed-bitrate codec like MPEG-4 Part 2. Such codecs need roughly twice the
+	// bitrate of H.264 for comparable sharpness on 2D content, so budget accordingly
+	// while still avoiding extreme output sizes.
+	const int64_t RawBitrate = (int64_t)((double)Width * Height * Fps * 0.30 + 0.5);
+	return std::clamp<int64_t>(RawBitrate, 4'000'000, 80'000'000);
+}
 
 static LEVEL AvLevelToLogLevel(int Level)
 {
@@ -547,12 +558,12 @@ void CVideo::FillAudioFrame(size_t ThreadIndex)
 		return;
 	}
 
-	const int MakeWriteableResult = av_frame_make_writable(m_AudioStream.m_vpFrames[ThreadIndex]);
-	if(MakeWriteableResult < 0)
+	const int MakeWritableResult = av_frame_make_writable(m_AudioStream.m_vpFrames[ThreadIndex]);
+	if(MakeWritableResult < 0)
 	{
 		char aError[AV_ERROR_MAX_STRING_SIZE];
-		av_strerror(MakeWriteableResult, aError, sizeof(aError));
-		log_error("videorecorder", "Could not make audio frame writeable: %s", aError);
+		av_strerror(MakeWritableResult, aError, sizeof(aError));
+		log_error("videorecorder", "Could not make audio frame writable: %s", aError);
 		return;
 	}
 
@@ -944,9 +955,9 @@ bool CVideo::AddStream(COutputStream *pStream, AVFormatContext *pFormatContext, 
 	}
 
 	case AVMEDIA_TYPE_VIDEO:
+	{
 		pContext->codec_id = CodecId;
 
-		pContext->bit_rate = 400000;
 		/* Resolution must be a multiple of two. */
 		pContext->width = m_Width;
 		pContext->height = m_Height % 2 == 0 ? m_Height : m_Height - 1;
@@ -973,14 +984,24 @@ bool CVideo::AddStream(COutputStream *pStream, AVFormatContext *pFormatContext, 
 			 * the motion of the chroma plane does not match the luma plane. */
 			pContext->mb_decision = 2;
 		}
-		if(CodecId == AV_CODEC_ID_H264)
+
+		const bool IsLibx264 = (*ppCodec)->name != nullptr && (str_comp((*ppCodec)->name, "libx264") == 0 || str_comp((*ppCodec)->name, "libx264rgb") == 0);
+		if(CodecId == AV_CODEC_ID_H264 && IsLibx264)
 		{
+			// CRF controls quality for x264, so don't constrain it with a fixed target bitrate.
+			pContext->bit_rate = 0;
+
 			static const char *s_apPresets[10] = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo"};
 			dbg_assert(g_Config.m_ClVideoX264Preset < (int)std::size(s_apPresets), "preset index invalid: %d", g_Config.m_ClVideoX264Preset);
 			dbg_assert(av_opt_set(pContext->priv_data, "preset", s_apPresets[g_Config.m_ClVideoX264Preset], 0) == 0, "invalid option");
 			dbg_assert(av_opt_set_int(pContext->priv_data, "crf", g_Config.m_ClVideoX264Crf, 0) == 0, "invalid option");
 		}
+		else
+		{
+			pContext->bit_rate = DefaultVideoBitrate(pContext->width, pContext->height, m_FPS);
+		}
 		break;
+	}
 
 	default:
 		break;

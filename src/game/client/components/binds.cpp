@@ -131,15 +131,25 @@ bool CBinds::OnInput(const IInput::CEvent &Event)
 		if(ActiveBind == m_vActiveBinds.end())
 		{
 			const auto &&OnKeyPress = [&](int Mask) {
-				const char *pBind = m_aapKeyBindings[Mask][Event.m_Key];
+				char aBind[512];
+				str_copy(aBind, m_aapKeyBindings[Mask][Event.m_Key], sizeof(aBind));
 				if(g_Config.m_ClSubTickAiming)
 				{
-					if(str_comp("+fire", pBind) == 0 || str_comp("+hook", pBind) == 0)
+					if(str_comp("+fire", aBind) == 0 || str_comp("+hook", aBind) == 0)
 					{
 						m_MouseOnAction = true;
 					}
 				}
-				Console()->ExecuteLineStroked(1, pBind, IConsole::CLIENT_ID_UNSPECIFIED);
+				if(g_Config.m_BcGoresMode &&
+					!GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_GAMEPLAY_GORES_MODE) &&
+					!GameClient()->m_Controls.m_WeaponsGot &&
+					str_find(aBind, "+fire") &&
+					!str_find(aBind, "+prevweapon"))
+				{
+					str_append(aBind, ";+prevweapon", sizeof(aBind));
+				}
+
+				Console()->ExecuteLineStroked(1, aBind, IConsole::CLIENT_ID_UNSPECIFIED);
 				m_vActiveBinds.emplace_back(Event.m_Key, Mask);
 			};
 
@@ -162,7 +172,18 @@ bool CBinds::OnInput(const IInput::CEvent &Event)
 			// Have to check for nullptr again because the previous execute can unbind itself
 			if(m_aapKeyBindings[ActiveBind->m_ModifierMask][ActiveBind->m_Key])
 			{
-				Console()->ExecuteLineStroked(1, m_aapKeyBindings[ActiveBind->m_ModifierMask][ActiveBind->m_Key], IConsole::CLIENT_ID_UNSPECIFIED);
+				char aBind[512];
+				str_copy(aBind, m_aapKeyBindings[ActiveBind->m_ModifierMask][ActiveBind->m_Key], sizeof(aBind));
+				if(g_Config.m_BcGoresMode &&
+					!GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_GAMEPLAY_GORES_MODE) &&
+					!GameClient()->m_Controls.m_WeaponsGot &&
+					str_find(aBind, "+fire") &&
+					!str_find(aBind, "+prevweapon"))
+				{
+					str_append(aBind, ";+prevweapon", sizeof(aBind));
+				}
+
+				Console()->ExecuteLineStroked(1, aBind, IConsole::CLIENT_ID_UNSPECIFIED);
 			}
 			Handled = true;
 		}
@@ -184,7 +205,18 @@ bool CBinds::OnInput(const IInput::CEvent &Event)
 			{
 				return;
 			}
-			Console()->ExecuteLineStroked(0, m_aapKeyBindings[Bind.m_ModifierMask][Bind.m_Key], IConsole::CLIENT_ID_UNSPECIFIED);
+			char aBind[512];
+			str_copy(aBind, m_aapKeyBindings[Bind.m_ModifierMask][Bind.m_Key], sizeof(aBind));
+			if(g_Config.m_BcGoresMode &&
+				!GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_GAMEPLAY_GORES_MODE) &&
+				!GameClient()->m_Controls.m_WeaponsGot &&
+				str_find(aBind, "+fire") &&
+				!str_find(aBind, "+prevweapon"))
+			{
+				str_append(aBind, ";+prevweapon", sizeof(aBind));
+			}
+
+			Console()->ExecuteLineStroked(0, aBind, IConsole::CLIENT_ID_UNSPECIFIED);
 		};
 
 		// Release active bind that uses this primary key
@@ -270,7 +302,7 @@ void CBinds::SetDefaults()
 	Bind(KEY_F2, "toggle_remote_console");
 	Bind(KEY_TAB, "+scoreboard");
 	Bind(KEY_EQUALS, "+statboard");
-	Bind(KEY_F10, "screenshot");
+		Bind(KEY_F10, "screenshot");
 
 	Bind(KEY_A, "+left");
 	Bind(KEY_D, "+right");
@@ -302,9 +334,10 @@ void CBinds::SetDefaults()
 	Bind(KEY_F3, "vote yes");
 	Bind(KEY_F4, "vote no");
 
-	Bind(KEY_K, "kill");
-	Bind(KEY_Q, "say /spec");
-	Bind(KEY_P, "say /pause");
+		Bind(KEY_K, "kill");
+Bind(KEY_J, "toggle_admin_panel");
+		Bind(KEY_Q, "say /spec");
+		Bind(KEY_P, "say /pause");
 
 	g_Config.m_ClDDRaceBindsSet = 0;
 	SetDDRaceBinds(false);

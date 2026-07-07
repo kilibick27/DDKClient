@@ -198,6 +198,8 @@ bool CHttpRequest::ConfigureHandle(void *pHandle)
 	curl_easy_setopt(pH, CURLOPT_NOSIGNAL, 1L);
 	curl_easy_setopt(pH, CURLOPT_USERAGENT, GAME_NAME " " GAME_RELEASE_VERSION " (" CONF_PLATFORM_STRING "; " CONF_ARCH_STRING ")");
 	curl_easy_setopt(pH, CURLOPT_ACCEPT_ENCODING, ""); // Use any compression algorithm supported by libcurl.
+	curl_easy_setopt(pH, CURLOPT_SSL_VERIFYPEER, m_VerifyPeer ? 1L : 0L);
+	curl_easy_setopt(pH, CURLOPT_SSL_VERIFYHOST, m_VerifyPeer ? 2L : 0L);
 
 	curl_easy_setopt(pH, CURLOPT_HEADERDATA, this);
 	curl_easy_setopt(pH, CURLOPT_HEADERFUNCTION, HeaderCallback);
@@ -221,7 +223,13 @@ bool CHttpRequest::ConfigureHandle(void *pHandle)
 		curl_easy_setopt(pH, CURLOPT_INTERFACE, g_Config.m_Bindaddr);
 	}
 
-	if(curl_version_info(CURLVERSION_NOW)->version_num < 0x074400)
+	if(m_CloseConnection)
+	{
+		curl_easy_setopt(pH, CURLOPT_FRESH_CONNECT, 1L);
+		curl_easy_setopt(pH, CURLOPT_FORBID_REUSE, 1L);
+		Header("Connection: close");
+	}
+	else if(curl_version_info(CURLVERSION_NOW)->version_num < 0x074400)
 	{
 		// Causes crashes, see https://github.com/ddnet/ddnet/issues/4342.
 		// No longer a problem in curl 7.68 and above, and 0x44 = 68.
@@ -642,8 +650,11 @@ void CHttp::RunLoop()
 	while(m_State == CHttp::RUNNING)
 	{
 		static int s_NextTimeout = std::numeric_limits<int>::max();
+		// Keep poll intervals short only while requests are running so external aborts
+		// are handled quickly without busy-waking the thread while idle.
+		const int PollTimeoutMs = m_RunningRequests.empty() ? s_NextTimeout : minimum(s_NextTimeout, 100);
 		int Events = 0;
-		const CURLMcode PollCode = curl_multi_poll(m_pMultiH, nullptr, 0, s_NextTimeout, &Events);
+		const CURLMcode PollCode = curl_multi_poll(m_pMultiH, nullptr, 0, PollTimeoutMs, &Events);
 
 		// We may have been woken up for a shutdown
 		if(m_Shutdown)
@@ -696,6 +707,24 @@ void CHttp::RunLoop()
 			}
 		}
 
+		for(auto RequestIt = m_RunningRequests.begin(); RequestIt != m_RunningRequests.end();)
+		{
+			if(!RequestIt->second->m_Abort.load(std::memory_order_relaxed))
+			{
+				++RequestIt;
+				continue;
+			}
+
+			void *pHandle = RequestIt->first;
+			auto pRequest = std::move(RequestIt->second);
+			RequestIt = m_RunningRequests.erase(RequestIt);
+
+			str_copy(pRequest->m_aErr, "Aborted");
+			pRequest->OnCompletionInternal(pHandle, CURLE_ABORTED_BY_CALLBACK);
+			curl_multi_remove_handle(m_pMultiH, pHandle);
+			curl_easy_cleanup(pHandle);
+		}
+
 		decltype(m_PendingRequests) NewRequests = {};
 		Lock.lock();
 		std::swap(m_PendingRequests, NewRequests);
@@ -706,6 +735,14 @@ void CHttp::RunLoop()
 			auto &pRequest = NewRequests.front();
 			if(g_Config.m_DbgCurl)
 				log_debug("http", "task: %s %s", CHttpRequest::GetRequestType(pRequest->m_Type), pRequest->m_aUrl);
+
+			if(pRequest->m_Abort.load(std::memory_order_relaxed))
+			{
+				str_copy(pRequest->m_aErr, "Aborted");
+				pRequest->OnCompletionInternal(nullptr, CURLE_ABORTED_BY_CALLBACK);
+				NewRequests.pop_front();
+				continue;
+			}
 
 			if(pRequest->ShouldSkipRequest())
 			{

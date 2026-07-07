@@ -29,6 +29,39 @@ inline constexpr float MARGIN = 10.0f;
 inline constexpr float BUTTON_HEIGHT = 20.0f;
 inline constexpr float BUTTON_SPACING = 2.0f;
 inline constexpr float BIND_OPTION_SPACING = 4.0f;
+inline constexpr int MAX_SENSITIVITY = 1000000;
+inline constexpr int MAX_SENSITIVITY_SLIDER = 500;
+
+namespace
+{
+bool DoSensitivityInput(CUi *pUi, CLineInputNumber *pInput, int *pOption, const CUIRect *pRect, const char *pLabel)
+{
+	CUIRect Label, EditBox;
+	pRect->VSplitLeft(210.0f, &Label, &EditBox);
+	pUi->DoLabel(&Label, pLabel, FONT_SIZE, TEXTALIGN_ML);
+	pInput->SetEmptyText("1-1000000");
+
+	if(!pInput->IsActive())
+	{
+		pInput->SetInteger(*pOption);
+	}
+
+	if(pUi->DoEditBox(pInput, &EditBox, 14.0f))
+	{
+		if(pInput->GetLength() > 0)
+		{
+			*pOption = maximum(1, minimum(MAX_SENSITIVITY, pInput->GetInteger()));
+			if(!pInput->IsActive())
+			{
+				pInput->SetInteger(*pOption);
+			}
+		}
+		return true;
+	}
+
+	return false;
+}
+} // namespace
 
 bool CBindSlotUiElement::operator<(const CBindSlotUiElement &Other) const
 {
@@ -65,7 +98,6 @@ void CMenusSettingsControls::OnInterfacesInit(CGameClient *pClient)
 		{EBindOptionGroup::MOVEMENT, Localizable("Move left"), "+left"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Move right"), "+right"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Jump"), "+jump"},
-		{EBindOptionGroup::MOVEMENT, Localizable("Stop movement"), "stop_movement"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Auto follow nearest"), "toggle cl_auto_follow 0 1"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Auto aim hook"), "toggle cl_auto_aim 0 1"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Fire"), "+fire"},
@@ -98,8 +130,23 @@ void CMenusSettingsControls::OnInterfacesInit(CGameClient *pClient)
 		{EBindOptionGroup::DUMMY, Localizable("Dummy copy"), "toggle cl_dummy_copy_moves 0 1"},
 		{EBindOptionGroup::DUMMY, Localizable("Dummy copy + pseudo"), "toggle cl_dummy_copy_moves_with_hammer 0 1"},
 		{EBindOptionGroup::DUMMY, Localizable("Dummy auto hook"), "toggle cl_dummy_auto_hook 0 1"},
-		{EBindOptionGroup::DUMMY, Localizable("Deepfly"), "toggle cl_dummy_deepfly 0 1"},
-		{EBindOptionGroup::DUMMY, Localizable("Pseudofly bind"), "+toggle cl_dummy_hammer 1 0"},
+		{EBindOptionGroup::DUMMY, Localizable("Hammerfly dummy"), "toggle cl_dummy_hammer 0 1"},
+		{EBindOptionGroup::BEST_CLIENT, Localizable("Dummy pseudo"), "+toggle cl_dummy_hammer 1 0"},
+		{EBindOptionGroup::BEST_CLIENT, Localizable("Deepfly toggle"), "toggle cl_dummy_deepfly 0 1"},
+		{EBindOptionGroup::BEST_CLIENT, Localizable("45 deg bind"), "+BC_45_degrees"},
+		{EBindOptionGroup::BEST_CLIENT, Localizable("Small sens bind"), "BC_small_sens"},
+			{EBindOptionGroup::BEST_CLIENT, Localizable("Left jump"), "+jump; +left"},
+			{EBindOptionGroup::BEST_CLIENT, Localizable("Right jump"), "+jump; +right"},
+			{EBindOptionGroup::BEST_CLIENT, Localizable("Admin Panel"), "toggle_admin_panel"},
+			{EBindOptionGroup::BEST_CLIENT_VOICE, Localizable("Voice panel"), "toggle_voice_panel"},
+			{EBindOptionGroup::BEST_CLIENT_VOICE, Localizable("Push-to-talk"), "+voicechat"},
+			{EBindOptionGroup::BEST_CLIENT_VOICE, Localizable("Mute microphone"), "toggle_voice_mic_mute"},
+			{EBindOptionGroup::BEST_CLIENT_VOICE, Localizable("Mute headphones"), "toggle_voice_headphones_mute"},
+			{EBindOptionGroup::BEST_CLIENT_PRACTICE, Localizable("say /r"), "say /r"},
+		{EBindOptionGroup::BEST_CLIENT_PRACTICE, Localizable("say /invincible"), "say /invincible"},
+		{EBindOptionGroup::BEST_CLIENT_PRACTICE, Localizable("say /telecursor"), "say /telecursor"},
+		{EBindOptionGroup::BEST_CLIENT_PRACTICE, Localizable("say /weapons"), "say /weapons"},
+		{EBindOptionGroup::BEST_CLIENT_PRACTICE, Localizable("say /unweapons"), "say /unweapons"},
 		{EBindOptionGroup::MISCELLANEOUS, Localizable("Emoticon"), "+emote"},
 		{EBindOptionGroup::MISCELLANEOUS, Localizable("Spectator mode"), "+spectate"},
 		{EBindOptionGroup::MISCELLANEOUS, Localizable("Spectate next"), "spectate_next"},
@@ -120,102 +167,10 @@ void CMenusSettingsControls::OnInterfacesInit(CGameClient *pClient)
 	m_aBindGroupExpanded[(int)EBindOptionGroup::CUSTOM] = false;
 
 	m_JoystickDropDownState.m_SelectionPopupContext.m_pScrollRegion = &m_JoystickDropDownScrollRegion;
-	
-	// Initialize hidden features state
-	m_ShowHiddenFeatures = false;
-	m_HiddenFeatureClickCount = 0;
-	m_HiddenFeatureFirstClickTime = 0.0;
-}
-
-void CMenusSettingsControls::CheckHiddenFeatureActivation()
-{
-	// Check if we need to add or remove hidden features
-	static bool s_LastShowState = false;
-	
-	if(m_ShowHiddenFeatures != s_LastShowState)
-	{
-		s_LastShowState = m_ShowHiddenFeatures;
-		
-		if(m_ShowHiddenFeatures)
-		{
-			// Add hidden features to the list
-			// Find position after "Stop movement" in MOVEMENT group
-			auto movementPos = std::find_if(m_vBindOptions.begin(), m_vBindOptions.end(), 
-				[](const CBindOption &opt) { return opt.m_Command == "stop_movement"; });
-			
-			if(movementPos != m_vBindOptions.end())
-			{
-				++movementPos; // Insert after "Stop movement"
-				movementPos = m_vBindOptions.insert(movementPos, {EBindOptionGroup::MOVEMENT, Localizable("Auto follow nearest"), "toggle cl_auto_follow 0 1"});
-				++movementPos;
-				m_vBindOptions.insert(movementPos, {EBindOptionGroup::MOVEMENT, Localizable("Auto aim hook"), "toggle cl_auto_aim 0 1"});
-			}
-			
-			// Find position after "Toggle dummy" in DUMMY group
-			auto dummyPos = std::find_if(m_vBindOptions.begin(), m_vBindOptions.end(),
-				[](const CBindOption &opt) { return opt.m_Command == "toggle cl_dummy 0 1"; });
-			
-			if(dummyPos != m_vBindOptions.end())
-			{
-				++dummyPos; // Insert after "Toggle dummy"
-				dummyPos = m_vBindOptions.insert(dummyPos, {EBindOptionGroup::DUMMY, Localizable("Dummy copy"), "toggle cl_dummy_copy_moves 0 1"});
-				++dummyPos;
-				dummyPos = m_vBindOptions.insert(dummyPos, {EBindOptionGroup::DUMMY, Localizable("Dummy copy + pseudo"), "toggle cl_dummy_copy_moves_with_hammer 0 1"});
-				++dummyPos;
-				m_vBindOptions.insert(dummyPos, {EBindOptionGroup::DUMMY, Localizable("Dummy auto hook"), "toggle cl_dummy_auto_hook 0 1"});
-			}
-			
-			m_NumPredefinedBindOptions = m_vBindOptions.size();
-		}
-		else
-		{
-			// Remove hidden features from the list
-			m_vBindOptions.erase(
-				std::remove_if(m_vBindOptions.begin(), m_vBindOptions.end(),
-					[](const CBindOption &opt) {
-						return opt.m_Command == "toggle cl_auto_follow 0 1" ||
-						       opt.m_Command == "toggle cl_auto_aim 0 1" ||
-						       opt.m_Command == "toggle cl_dummy_copy_moves 0 1" ||
-						       opt.m_Command == "toggle cl_dummy_copy_moves_with_hammer 0 1" ||
-						       opt.m_Command == "toggle cl_dummy_auto_hook 0 1";
-					}),
-				m_vBindOptions.end());
-			
-			m_NumPredefinedBindOptions = m_vBindOptions.size();
-		}
-		
-		UpdateSearchMatches();
-	}
 }
 
 void CMenusSettingsControls::Render(CUIRect MainView)
 {
-	// Check for hidden feature activation (4 clicks within 1 second on the controls tab)
-	static int s_ControlsTabActivationId = 0;
-	if(Ui()->DoButtonLogic(&s_ControlsTabActivationId, 0, &MainView, BUTTONFLAG_NONE))
-	{
-		double currentTime = Client()->GlobalTime();
-		
-		// Reset counter if more than 1 second has passed
-		if(currentTime - m_HiddenFeatureFirstClickTime > 1.0)
-		{
-			m_HiddenFeatureClickCount = 0;
-			m_HiddenFeatureFirstClickTime = currentTime;
-		}
-		
-		m_HiddenFeatureClickCount++;
-		
-		// Activate hidden features after 4 clicks
-		if(m_HiddenFeatureClickCount >= 4)
-		{
-			m_ShowHiddenFeatures = true;
-			m_HiddenFeatureClickCount = 0;
-		}
-	}
-	
-	// Deactivate hidden features when leaving the tab (will be handled by menu system)
-	CheckHiddenFeatureActivation();
-	
 	UpdateBindOptions();
 
 	CUIRect QuickSearch, SearchMatches, ResetToDefault;
@@ -291,6 +246,9 @@ void CMenusSettingsControls::Render(CUIRect MainView)
 	RenderSettingsBindsBlock(EBindOptionGroup::VOTING, &RightColumn, Localize("Voting"));
 	RenderSettingsBindsBlock(EBindOptionGroup::CHAT, &RightColumn, Localize("Chat"));
 	RenderSettingsBindsBlock(EBindOptionGroup::DUMMY, &RightColumn, Localize("Dummy"));
+	RenderSettingsBindsBlock(EBindOptionGroup::BEST_CLIENT, &RightColumn, Localize("BestClient"));
+	RenderSettingsBindsBlock(EBindOptionGroup::BEST_CLIENT_VOICE, &RightColumn, Localize("BestClient Voice"));
+	RenderSettingsBindsBlock(EBindOptionGroup::BEST_CLIENT_PRACTICE, &RightColumn, Localize("BestClient Practice"));
 	RenderSettingsBindsBlock(EBindOptionGroup::MISCELLANEOUS, &RightColumn, Localize("Miscellaneous"));
 	if(std::any_of(m_vBindOptions.begin(), m_vBindOptions.end(), [](const CBindOption &Option) { return Option.m_Group == EBindOptionGroup::CUSTOM; }))
 	{
@@ -498,7 +456,7 @@ void CMenusSettingsControls::RenderSettingsBlock(float Height, CUIRect *pParentR
 			{
 				CUIRect ButtonArea;
 				Label.Margin(-MARGIN, &ButtonArea);
-				if(Ui()->DoButtonLogic(pExpandButton, 0, &ButtonArea, BUTTONFLAG_LEFT))
+				if(Ui()->DoButtonLogic(pExpandButton, 0, &ButtonArea, BUTTONFLAG_LEFT, CUi::EButtonSoundType::BUTTON))
 				{
 					*pExpanded = !*pExpanded;
 				}
@@ -607,7 +565,7 @@ void CMenusSettingsControls::RenderSettingsBinds(EBindOptionGroup Group, CUIRect
 			FONT_SIZE, TEXTALIGN_ML, LabelProps);
 		if(BindOption.m_Group != EBindOptionGroup::CUSTOM || LabelResult.m_Truncated)
 		{
-			Ui()->DoButtonLogic(&BindOption.m_TooltipButtonId, 0, &Label, BUTTONFLAG_NONE);
+			Ui()->DoButtonLogic(&BindOption.m_TooltipButtonId, 0, &Label, BUTTONFLAG_NONE, CUi::EButtonSoundType::SILENT);
 			GameClient()->m_Tooltips.DoToolTip(&BindOption.m_TooltipButtonId, &Label, BindOption.m_Command.c_str());
 		}
 
@@ -660,20 +618,30 @@ void CMenusSettingsControls::RenderSettingsBinds(EBindOptionGroup Group, CUIRect
 
 float CMenusSettingsControls::MeasureSettingsMouseHeight() const
 {
-	return 2.0f * BUTTON_HEIGHT + BUTTON_SPACING;
+	return 4.0f * BUTTON_HEIGHT + 3.0f * BUTTON_SPACING;
 }
 
 void CMenusSettingsControls::RenderSettingsMouse(CUIRect View)
 {
 	CUIRect Button;
 	View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
-	Ui()->DoScrollbarOption(&g_Config.m_InpMousesens, &g_Config.m_InpMousesens, &Button, Localize("Ingame mouse sens."), 1, 500,
+	DoSensitivityInput(Ui(), &m_IngameMouseSensInput, &g_Config.m_InpMousesens, &Button, Localize("Ingame mouse sens"));
+
+	View.HSplitTop(BUTTON_SPACING, nullptr, &View);
+
+	View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
+	Ui()->DoScrollbarOption(&g_Config.m_InpMousesens, &g_Config.m_InpMousesens, &Button, Localize("Ingame mouse sens."), 1, MAX_SENSITIVITY_SLIDER,
 		&CUi::ms_LogarithmicScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE);
 
 	View.HSplitTop(BUTTON_SPACING, nullptr, &View);
 
 	View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
-	Ui()->DoScrollbarOption(&g_Config.m_UiMousesens, &g_Config.m_UiMousesens, &Button, Localize("UI mouse sens."), 1, 500,
+	DoSensitivityInput(Ui(), &m_UiMouseSensInput, &g_Config.m_UiMousesens, &Button, Localize("UI mouse sens"));
+
+	View.HSplitTop(BUTTON_SPACING, nullptr, &View);
+
+	View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
+	Ui()->DoScrollbarOption(&g_Config.m_UiMousesens, &g_Config.m_UiMousesens, &Button, Localize("UI mouse sens."), 1, MAX_SENSITIVITY_SLIDER,
 		&CUi::ms_LogarithmicScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE | CUi::SCROLLBAR_OPTION_DELAYUPDATE);
 }
 
@@ -685,9 +653,9 @@ float CMenusSettingsControls::MeasureSettingsJoystickHeight() const
 		NumOptions++; // message or joystick name/selection
 		if(Input()->NumJoysticks() > 0)
 		{
-			NumOptions += 3; // mode, ui sens, tolerance
+			NumOptions += 4; // mode, ui sens input, ui sens slider, tolerance
 			if(!g_Config.m_InpControllerAbsolute)
-				NumOptions++; // ingame sens
+				NumOptions += 2; // ingame sens input + slider
 			NumOptions += Input()->GetActiveJoystick()->GetNumAxes() + 1; // axis selection + header
 		}
 	}
@@ -758,13 +726,21 @@ void CMenusSettingsControls::RenderSettingsJoystick(CUIRect View)
 		{
 			View.HSplitTop(BUTTON_SPACING, nullptr, &View);
 			View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
-			Ui()->DoScrollbarOption(&g_Config.m_InpControllerSens, &g_Config.m_InpControllerSens, &Button, Localize("Ingame controller sens."), 1, 500,
+			DoSensitivityInput(Ui(), &m_IngameControllerSensInput, &g_Config.m_InpControllerSens, &Button, Localize("Ingame controller sens"));
+
+			View.HSplitTop(BUTTON_SPACING, nullptr, &View);
+			View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
+			Ui()->DoScrollbarOption(&g_Config.m_InpControllerSens, &g_Config.m_InpControllerSens, &Button, Localize("Ingame controller sens."), 1, MAX_SENSITIVITY_SLIDER,
 				&CUi::ms_LogarithmicScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE);
 		}
 
 		View.HSplitTop(BUTTON_SPACING, nullptr, &View);
 		View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
-		Ui()->DoScrollbarOption(&g_Config.m_UiControllerSens, &g_Config.m_UiControllerSens, &Button, Localize("UI controller sens."), 1, 500,
+		DoSensitivityInput(Ui(), &m_UiControllerSensInput, &g_Config.m_UiControllerSens, &Button, Localize("UI controller sens"));
+
+		View.HSplitTop(BUTTON_SPACING, nullptr, &View);
+		View.HSplitTop(BUTTON_HEIGHT, &Button, &View);
+		Ui()->DoScrollbarOption(&g_Config.m_UiControllerSens, &g_Config.m_UiControllerSens, &Button, Localize("UI controller sens."), 1, MAX_SENSITIVITY_SLIDER,
 			&CUi::ms_LogarithmicScrollbarScale, CUi::SCROLLBAR_OPTION_NOCLAMPVALUE);
 
 		View.HSplitTop(BUTTON_SPACING, nullptr, &View);

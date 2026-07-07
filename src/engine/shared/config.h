@@ -60,6 +60,33 @@ public:
 
 extern CConfig g_Config;
 
+static constexpr int BC_FAST_INPUT_GAMMA_UI_MAX = 600;
+
+constexpr int BcFastInputGammaUiToEffectiveAmount(int GammaUiAmount)
+{
+	if(GammaUiAmount <= 0)
+		return 0;
+	if(GammaUiAmount >= BC_FAST_INPUT_GAMMA_UI_MAX)
+		return BC_FAST_INPUT_GAMMA_UI_MAX;
+	return GammaUiAmount;
+}
+
+constexpr int BcFastInputGammaEffectiveToUiAmount(int EffectiveAmount)
+{
+	if(EffectiveAmount <= 0)
+		return 0;
+	if(EffectiveAmount >= BC_FAST_INPUT_GAMMA_UI_MAX)
+		return BC_FAST_INPUT_GAMMA_UI_MAX;
+	return EffectiveAmount;
+}
+
+constexpr int BcFastInputNormalizedMode(int Mode)
+{
+	if(Mode == 2)
+		return 3;
+	return Mode;
+}
+
 /**
  * The default values of all config variables in @link CConfig @endlink.
  */
@@ -274,6 +301,9 @@ class CConfigManager : public IConfigManager
 	static void Con_Reset(IConsole::IResult *pResult, void *pUserData);
 	static void Con_Toggle(IConsole::IResult *pResult, void *pUserData);
 	static void Con_ToggleStroke(IConsole::IResult *pResult, void *pUserData);
+	static void Con_TcFastInputModeLegacy(IConsole::IResult *pResult, void *pUserData);
+	static void Con_TcFastInputDeltaInputLegacy(IConsole::IResult *pResult, void *pUserData);
+	static void Con_TcDeltaInputOthersLegacy(IConsole::IResult *pResult, void *pUserData);
 
 public:
 	CConfigManager();

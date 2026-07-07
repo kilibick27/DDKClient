@@ -20,6 +20,7 @@
 
 #include <generated/client_data.h>
 
+#include <game/client/components/bestclient/version.h>
 #include <game/client/components/tclient/colored_parts.h>
 #include <game/client/gameclient.h>
 #include <game/client/ui.h>
@@ -30,6 +31,8 @@
 
 static constexpr float FONT_SIZE = 10.0f;
 static constexpr float LINE_SPACING = 1.0f;
+static constexpr float CONSOLE_SCROLLBAR_WIDTH = 18.0f;
+static constexpr float CONSOLE_SCROLLBAR_MARGIN = 5.0f;
 
 class CConsoleLogger : public ILogger
 {
@@ -827,12 +830,31 @@ void CGameConsole::CInstance::UpdateEntryTextAttributes(CBacklogEntry *pEntry) c
 	CTextCursor Cursor;
 	Cursor.m_FontSize = FONT_SIZE;
 	Cursor.m_Flags = 0;
-	Cursor.m_LineWidth = m_pGameConsole->Ui()->Screen()->w - 10;
+	Cursor.m_LineWidth = LogLineWidth();
 	Cursor.m_MaxLines = 10;
 	Cursor.m_LineSpacing = LINE_SPACING;
 	m_pGameConsole->TextRender()->TextEx(&Cursor, pEntry->m_aText, -1);
 	pEntry->m_YOffset = Cursor.Height();
 	pEntry->m_LineCount = Cursor.m_LineCount;
+}
+
+int CGameConsole::CInstance::TotalBacklogLines()
+{
+	int Lines = 0;
+	for(CBacklogEntry *pEntry = m_Backlog.First(); pEntry; pEntry = m_Backlog.Next(pEntry))
+	{
+		if(pEntry->m_LineCount == -1)
+			UpdateEntryTextAttributes(pEntry);
+		Lines += pEntry->m_LineCount;
+	}
+	return Lines;
+}
+
+float CGameConsole::CInstance::LogLineWidth() const
+{
+	float Width = m_pGameConsole->Ui()->Screen()->w - 10.0f;
+	Width -= (CONSOLE_SCROLLBAR_WIDTH + CONSOLE_SCROLLBAR_MARGIN);
+	return maximum(0.0f, Width);
 }
 
 bool CGameConsole::CInstance::IsInputHidden() const
@@ -896,7 +918,7 @@ void CGameConsole::CInstance::UpdateSearch()
 	}
 
 	ITextRender *pTextRender = m_pGameConsole->Ui()->TextRender();
-	const int LineWidth = m_pGameConsole->Ui()->Screen()->w - 10.0f;
+	const int LineWidth = (int)LogLineWidth();
 
 	CBacklogEntry *pEntry = m_Backlog.Last();
 	int EntryLine = 0, LineToScrollStart = 0, LineToScrollEnd = 0;
@@ -1427,6 +1449,91 @@ void CGameConsole::OnRender()
 				pConsole->m_NewLineCounter = 0;
 		}
 
+		if(m_ConsoleType == CONSOLETYPE_LOCAL || m_ConsoleType == CONSOLETYPE_REMOTE)
+		{
+			const float LogTop = RowHeight;
+			const float LogBottom = y;
+			const float LogHeight = maximum(0.0f, LogBottom - LogTop);
+			const float RailMargin = 5.0f; // keep in sync with CUi::DoScrollbarV
+			const float RailWidth = maximum(0.0f, CONSOLE_SCROLLBAR_WIDTH - 2.0f * RailMargin);
+			const float MinRailHeight = RailWidth * 3.0f;
+			const float MinScrollbarHeight = MinRailHeight + 2.0f * RailMargin;
+			if(LogHeight >= MinScrollbarHeight && RailWidth > 0.0f)
+			{
+				const int VisibleLines = maximum(1, (int)std::floor(LogHeight / LineHeight));
+				const int TotalLines = pConsole->TotalBacklogLines();
+				const int MaxScroll = maximum(0, TotalLines - VisibleLines);
+				const float Current = MaxScroll > 0 ? 1.0f - (float)pConsole->m_BacklogCurLine / (float)MaxScroll : 1.0f;
+
+				CUIRect ScrollbarRect;
+				ScrollbarRect.x = Screen.w - CONSOLE_SCROLLBAR_WIDTH - CONSOLE_SCROLLBAR_MARGIN;
+				ScrollbarRect.y = LogTop;
+				ScrollbarRect.w = CONSOLE_SCROLLBAR_WIDTH;
+				ScrollbarRect.h = LogHeight;
+
+				CUIRect Rail;
+				ScrollbarRect.Margin(RailMargin, &Rail);
+				CUIRect Handle;
+				Rail.HSplitTop(std::clamp(33.0f, Rail.w, Rail.h / 3.0f), &Handle, nullptr);
+				Handle.y = Rail.y + (Rail.h - Handle.h) * Current;
+
+				const vec2 MousePos = m_TouchState.m_PrimaryPressed ? (m_TouchState.m_PrimaryPosition * ScreenSize) : (Input()->NativeMousePos() / WindowSize * ScreenSize);
+				const bool MouseDown = m_TouchState.m_PrimaryPressed || Input()->NativeMousePressed(1);
+
+				const auto InsideRect = [&](const CUIRect &Rect) {
+					return MousePos.x >= Rect.x && MousePos.x <= Rect.x + Rect.w && MousePos.y >= Rect.y && MousePos.y <= Rect.y + Rect.h;
+				};
+
+				if(!MouseDown)
+				{
+					pConsole->m_ScrollbarDragging = false;
+				}
+				else if(!pConsole->m_ScrollbarDragging && InsideRect(Rail))
+				{
+					if(InsideRect(Handle))
+						pConsole->m_ScrollbarDragOffset = MousePos.y - Handle.y;
+					else
+						pConsole->m_ScrollbarDragOffset = Handle.h / 2.0f;
+					pConsole->m_ScrollbarDragging = true;
+				}
+
+				float NewValue = Current;
+				if(pConsole->m_ScrollbarDragging)
+				{
+					const float Min = Rail.y;
+					const float Max = Rail.h - Handle.h;
+					const float Cur = MousePos.y - pConsole->m_ScrollbarDragOffset;
+					NewValue = std::clamp((Cur - Min) / Max, 0.0f, 1.0f);
+				}
+
+				if(MaxScroll > 0)
+				{
+					const int NewLine = std::clamp((int)std::round((1.0f - NewValue) * MaxScroll), 0, MaxScroll);
+					if(NewLine != pConsole->m_BacklogCurLine)
+					{
+						pConsole->m_BacklogCurLine = NewLine;
+						pConsole->m_BacklogLastActiveLine = pConsole->m_BacklogCurLine;
+						pConsole->m_HasSelection = false;
+					}
+				}
+				else
+				{
+					pConsole->m_BacklogCurLine = 0;
+					pConsole->m_BacklogLastActiveLine = 0;
+				}
+
+				if(pConsole->m_ScrollbarDragging)
+				{
+					pConsole->m_MouseIsPress = false;
+					pConsole->m_HasSelection = false;
+				}
+
+				Rail.Draw(ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f), IGraphics::CORNER_ALL, Rail.w / 2.0f);
+				const ColorRGBA HandleColor = pConsole->m_ScrollbarDragging ? ColorRGBA(0.8f, 0.8f, 0.8f, 1.0f) : ColorRGBA(0.6f, 0.6f, 0.6f, 1.0f);
+				Handle.Draw(HandleColor, IGraphics::CORNER_ALL, Handle.w / 2.0f);
+			}
+		}
+
 		// render console log (current entry, status, wrap lines)
 		CInstance::CBacklogEntry *pEntry = pConsole->m_Backlog.Last();
 		float OffsetY = 0.0f;
@@ -1490,7 +1597,7 @@ void CGameConsole::OnRender()
 			CTextCursor EntryCursor;
 			EntryCursor.SetPosition(vec2(0.0f, y - OffsetY));
 			EntryCursor.m_FontSize = FONT_SIZE;
-			EntryCursor.m_LineWidth = Screen.w - 10.0f;
+			EntryCursor.m_LineWidth = pConsole->LogLineWidth();
 			EntryCursor.m_MaxLines = pEntry->m_LineCount;
 			EntryCursor.m_LineSpacing = LINE_SPACING;
 			EntryCursor.m_CalculateSelectionMode = (m_ConsoleState == CONSOLE_OPEN && pConsole->m_MousePress.y < pConsole->m_BoundingBox.m_Y && (pConsole->m_MouseIsPress || (pConsole->m_CurSelStart != pConsole->m_CurSelEnd) || pConsole->m_HasSelection)) ? TEXT_CURSOR_SELECTION_MODE_CALCULATE : TEXT_CURSOR_SELECTION_MODE_NONE;
@@ -1617,14 +1724,19 @@ void CGameConsole::OnRender()
 		str_copy(aBuf, "v" GAME_VERSION " on " CONF_PLATFORM_STRING " " CONF_ARCH_STRING);
 		TextRender()->Text(Screen.w - TextRender()->TextWidth(FONT_SIZE, aBuf) - 10.0f, FONT_SIZE / 2.f, FONT_SIZE, aBuf);
 
-		// TClient: render client version
-		const char *pClientVersion = CLIENT_NAME " " CLIENT_RELEASE_VERSION;
+		// BestClient: render primary client version
+		const char *pClientVersion = "BestClient " BESTCLIENT_VERSION;
 		TextRender()->Text(Screen.w - TextRender()->TextWidth(FONT_SIZE, pClientVersion) - 10.0f, FONT_SIZE / 2.0f + FONT_SIZE * 1.5f, FONT_SIZE, pClientVersion);
 	}
 }
 
 void CGameConsole::OnMessage(int MsgType, void *pRawMsg)
 {
+}
+
+bool CGameConsole::OnCursorMove(float, float, IInput::ECursorType)
+{
+	return IsActive();
 }
 
 bool CGameConsole::OnInput(const IInput::CEvent &Event)
@@ -1634,6 +1746,17 @@ bool CGameConsole::OnInput(const IInput::CEvent &Event)
 		return false;
 	if((Event.m_Key >= KEY_F1 && Event.m_Key <= KEY_F12) || (Event.m_Key >= KEY_F13 && Event.m_Key <= KEY_F24))
 		return false;
+
+	#if defined(CONF_PLATFORM_ANDROID)
+	if(Event.m_Key == KEY_ESCAPE && (Event.m_Flags & IInput::FLAG_PRESS) &&
+		(Graphics()->IsScreenKeyboardShown() || Client()->GlobalTime() < m_IgnoreAndroidEscapeUntil))
+	{
+		// The Android back key is translated to escape globally. Ignore it while
+		// the software keyboard is visible or has just been requested, as SDL may
+		// report the keyboard as hidden for a few frames while it is opening.
+		return true;
+	}
+	#endif
 
 	if(Event.m_Key == KEY_ESCAPE && (Event.m_Flags & IInput::FLAG_PRESS) && !CurrentConsole()->m_Searching)
 		Toggle(m_ConsoleType);
@@ -1669,7 +1792,13 @@ void CGameConsole::Toggle(int Type)
 		if(m_ConsoleState == CONSOLE_CLOSED || m_ConsoleState == CONSOLE_CLOSING)
 		{
 			Ui()->SetEnabled(false);
+			Ui()->SetHotItem(nullptr);
+			Ui()->SetActiveItem(nullptr);
+			Ui()->ClearHotkeys();
 			m_ConsoleState = CONSOLE_OPENING;
+			#if defined(CONF_PLATFORM_ANDROID)
+			m_IgnoreAndroidEscapeUntil = Client()->GlobalTime() + m_StateChangeDuration + 0.25f;
+			#endif
 		}
 		else
 		{

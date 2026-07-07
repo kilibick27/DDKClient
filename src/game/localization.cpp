@@ -24,6 +24,12 @@ const char *TCLocalize(const char *pStr, const char *pContext)
 	return Localize(pStr, pContext);
 }
 
+// BestClient
+const char *BCLocalize(const char *pStr, const char *pContext)
+{
+	return Localize(pStr, pContext);
+}
+
 void CLocalizationDatabase::LoadIndexfile(IStorage *pStorage, IConsole *pConsole)
 {
 	m_vLanguages.clear();
@@ -253,8 +259,14 @@ bool CLocalizationDatabase::Load(const char *pFilename, IStorage *pStorage, ICon
 
 void CLocalizationDatabase::AddString(const char *pOrgStr, const char *pNewStr, const char *pContext)
 {
-	if(!FindString(str_quickhash(pOrgStr), str_quickhash(pContext)))
-		m_vStrings.emplace_back(str_quickhash(pOrgStr), str_quickhash(pContext), m_StringsHeap.StoreString(*pNewStr ? pNewStr : pOrgStr));
+	const unsigned Hash = str_quickhash(pOrgStr);
+	const unsigned ContextHash = str_quickhash(pContext);
+	for(const CString &String : m_vStrings)
+	{
+		if(String.m_Hash == Hash && String.m_ContextHash == ContextHash)
+			return;
+	}
+	m_vStrings.emplace_back(Hash, ContextHash, m_StringsHeap.StoreString(*pNewStr ? pNewStr : pOrgStr));
 }
 
 const char *CLocalizationDatabase::FindString(unsigned Hash, unsigned ContextHash) const

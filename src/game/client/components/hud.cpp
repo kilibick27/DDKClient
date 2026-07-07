@@ -5,14 +5,18 @@
 #include "binds.h"
 #include "camera.h"
 #include "controls.h"
+#include "hud_layout.h"
 #include "voting.h"
 
 #include <base/color.h>
+#include <base/log.h>
 #include <base/time.h>
 
 #include <engine/font_icons.h>
 #include <engine/graphics.h>
+#include <engine/keys.h>
 #include <engine/shared/config.h>
+#include <engine/storage.h>
 #include <engine/textrender.h>
 
 #include <generated/client_data.h>
@@ -24,8 +28,555 @@
 #include <game/client/prediction/entities/character.h>
 #include <game/layers.h>
 #include <game/localization.h>
+#include <game/mapitems.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <queue>
+
+namespace
+{
+	ColorRGBA ThemeHudColor(CGameClient *pGameClient, ColorRGBA Fallback, bool ForcePreview, float MixAmount)
+	{
+		ColorRGBA ThemeColor;
+		if(pGameClient != nullptr && pGameClient->m_MusicPlayer.GetHudThemeColor(ThemeColor, ForcePreview))
+		{
+			const float Blend = std::clamp(MixAmount, 0.0f, 1.0f);
+			return ColorRGBA(
+				mix(Fallback.r, ThemeColor.r, Blend),
+				mix(Fallback.g, ThemeColor.g, Blend),
+				mix(Fallback.b, ThemeColor.b, Blend),
+				mix(Fallback.a, ThemeColor.a, Blend));
+		}
+		return Fallback;
+	}
+
+	constexpr float KEYSTROKES_ATLAS_SCALE = 0.14f;
+	constexpr float KEYSTROKES_DEFAULT_GAP = 4.0f;
+	constexpr int KEYSTROKES_WHEEL_HIGHLIGHT_MS = 150;
+	constexpr int INPUT_OVERLAY_TEXTURE_SPACE = 3;
+	constexpr int KEYSTROKES_KEYBOARD_ATLAS_WIDTH = 1725;
+	constexpr int KEYSTROKES_KEYBOARD_ATLAS_HEIGHT = 1050;
+	constexpr int KEYSTROKES_MOUSE_ATLAS_WIDTH = 715;
+	constexpr int KEYSTROKES_MOUSE_ATLAS_HEIGHT = 353;
+	constexpr float FINISH_PREDICTION_BAR_WIDTH = 170.0f;
+	constexpr float FINISH_PREDICTION_BAR_HEIGHT = 34.0f;
+
+	enum class EKeystrokesInputKind
+	{
+		NONE,
+		KEY,
+		MOUSE_BUTTON,
+		WHEEL,
+		MOUSE_MOVE,
+	};
+
+	struct SKeystrokesElement
+	{
+		EKeystrokesInputKind m_InputKind;
+		int m_KeyPrimary;
+		int m_KeySecondary;
+		int m_MouseButton;
+		int m_WheelDir;
+		int m_MapX;
+		int m_MapY;
+		int m_MapW;
+		int m_MapH;
+		int m_PosX;
+		int m_PosY;
+		int m_ZLevel;
+		int m_MouseType;
+		int m_MouseRadius;
+		bool m_ActiveOnly;
+	};
+
+	struct SKeystrokesOverlayPreset
+	{
+		int m_OverlayWidth;
+		int m_OverlayHeight;
+		int m_PressedOffsetY;
+		int m_AtlasWidth;
+		int m_AtlasHeight;
+		const SKeystrokesElement *m_pElements;
+		int m_NumElements;
+	};
+
+	template<typename T, size_t N>
+	constexpr int ArrayCount(const T (&)[N])
+	{
+		return (int)N;
+	}
+
+	constexpr SKeystrokesElement KeyboardElement(int PrimaryKey, int SecondaryKey, int MapX, int MapY, int MapW, int MapH, int PosX, int PosY, int ZLevel = 1)
+	{
+		return {EKeystrokesInputKind::KEY, PrimaryKey, SecondaryKey, 0, 0, MapX, MapY, MapW, MapH, PosX, PosY, ZLevel, 0, 0, false};
+	}
+
+	constexpr SKeystrokesElement StaticElement(int MapX, int MapY, int MapW, int MapH, int PosX, int PosY, int ZLevel = 1)
+	{
+		return {EKeystrokesInputKind::NONE, 0, 0, 0, 0, MapX, MapY, MapW, MapH, PosX, PosY, ZLevel, 0, 0, false};
+	}
+
+	constexpr SKeystrokesElement MouseButtonElement(int MouseButton, int MapX, int MapY, int MapW, int MapH, int PosX, int PosY, bool ActiveOnly = false, int ZLevel = 1)
+	{
+		return {EKeystrokesInputKind::MOUSE_BUTTON, 0, 0, MouseButton, 0, MapX, MapY, MapW, MapH, PosX, PosY, ZLevel, 0, 0, ActiveOnly};
+	}
+
+	constexpr SKeystrokesElement WheelElement(int WheelDir, int MapX, int MapY, int MapW, int MapH, int PosX, int PosY, bool ActiveOnly = false, int ZLevel = 1)
+	{
+		return {EKeystrokesInputKind::WHEEL, 0, 0, 0, WheelDir, MapX, MapY, MapW, MapH, PosX, PosY, ZLevel, 0, 0, ActiveOnly};
+	}
+
+	constexpr SKeystrokesElement MouseMoveElement(int MouseType, int MapX, int MapY, int MapW, int MapH, int PosX, int PosY, int MouseRadius, int ZLevel = 1)
+	{
+		return {EKeystrokesInputKind::MOUSE_MOVE, 0, 0, 0, 0, MapX, MapY, MapW, MapH, PosX, PosY, ZLevel, MouseType, MouseRadius, false};
+	}
+
+	const SKeystrokesElement gs_aKeyboardMinimalElements[] = {
+		KeyboardElement(KEY_Q, 0, 1, 1, 157, 128, 137, 0),
+		KeyboardElement(KEY_W, 0, 161, 1, 157, 128, 274, 0),
+		KeyboardElement(KEY_E, 0, 321, 1, 157, 128, 411, 0),
+		KeyboardElement(KEY_LSHIFT, KEY_RSHIFT, 481, 1, 157, 128, 0, 133),
+		KeyboardElement(KEY_A, 0, 641, 1, 157, 128, 137, 133),
+		KeyboardElement(KEY_S, 0, 801, 1, 157, 128, 274, 133),
+		KeyboardElement(KEY_D, 0, 961, 1, 157, 128, 411, 133),
+		KeyboardElement(KEY_LCTRL, KEY_RCTRL, 1121, 1, 157, 128, 0, 266),
+		KeyboardElement(KEY_SPACE, 0, 1301, 1, 421, 128, 137, 266),
+	};
+
+	const SKeystrokesElement gs_aKeyboardFullElements[] = {
+		KeyboardElement(KEY_Q, 0, 1, 1, 157, 128, 137, 0),
+		KeyboardElement(KEY_W, 0, 161, 1, 157, 128, 274, 0),
+		KeyboardElement(KEY_E, 0, 321, 1, 157, 128, 411, 0),
+		KeyboardElement(KEY_TAB, 0, 1, 263, 157, 128, 0, 0),
+		KeyboardElement(KEY_LSHIFT, KEY_RSHIFT, 481, 1, 157, 128, 0, 133),
+		KeyboardElement(KEY_A, 0, 641, 1, 157, 128, 137, 133),
+		KeyboardElement(KEY_S, 0, 801, 1, 157, 128, 274, 133),
+		KeyboardElement(KEY_D, 0, 961, 1, 157, 128, 411, 133),
+		KeyboardElement(KEY_R, 0, 161, 263, 157, 128, 548, 0),
+		KeyboardElement(KEY_F, 0, 321, 263, 157, 128, 548, 133),
+		KeyboardElement(KEY_LCTRL, KEY_RCTRL, 1121, 1, 157, 128, 0, 266),
+		KeyboardElement(KEY_SPACE, 0, 1301, 1, 421, 128, 137, 266),
+	};
+
+	const SKeystrokesElement gs_aKeyboardMicroElements[] = {
+		KeyboardElement(KEY_A, 0, 641, 1, 157, 128, 30, 0),
+		KeyboardElement(KEY_S, 0, 801, 1, 157, 128, 167, 0),
+		KeyboardElement(KEY_D, 0, 961, 1, 157, 128, 304, 0),
+		KeyboardElement(KEY_SPACE, 0, 1301, 1, 421, 128, 5, 133),
+	};
+
+	const SKeystrokesOverlayPreset gs_aKeyboardPresets[] = {
+		{568, 394, 130, KEYSTROKES_KEYBOARD_ATLAS_WIDTH, KEYSTROKES_KEYBOARD_ATLAS_HEIGHT, gs_aKeyboardMinimalElements, ArrayCount(gs_aKeyboardMinimalElements)},
+		{705, 394, 130, KEYSTROKES_KEYBOARD_ATLAS_WIDTH, KEYSTROKES_KEYBOARD_ATLAS_HEIGHT, gs_aKeyboardFullElements, ArrayCount(gs_aKeyboardFullElements)},
+		{461, 261, 130, KEYSTROKES_KEYBOARD_ATLAS_WIDTH, KEYSTROKES_KEYBOARD_ATLAS_HEIGHT, gs_aKeyboardMicroElements, ArrayCount(gs_aKeyboardMicroElements)},
+	};
+
+	const SKeystrokesElement gs_aMouseArrowElements[] = {
+		StaticElement(328, 1, 283, 242, 2, 179),
+		StaticElement(1, 1, 139, 174, 2, 0),
+		StaticElement(143, 1, 139, 174, 146, 0),
+		StaticElement(285, 246, 48, 95, 117, 79),
+		StaticElement(285, 1, 40, 62, 0, 210),
+		StaticElement(284, 1, 41, 62, 11, 273),
+		MouseMoveElement(1, 614, 1, 100, 100, 95, 238, 50),
+		MouseButtonElement(1, 1, 178, 139, 174, 2, 0, true, 2),
+		MouseButtonElement(2, 143, 178, 139, 174, 146, 0, true, 2),
+		MouseButtonElement(3, 336, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(1, 387, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(2, 438, 246, 48, 95, 117, 79, true, 2),
+		MouseButtonElement(5, 285, 66, 40, 62, 0, 210, true, 2),
+		MouseButtonElement(4, 285, 66, 40, 62, 11, 273, true, 2),
+	};
+
+	const SKeystrokesElement gs_aMouseDotElements[] = {
+		StaticElement(328, 1, 283, 242, 2, 179),
+		StaticElement(1, 1, 139, 174, 2, 0),
+		StaticElement(143, 1, 139, 174, 146, 0),
+		StaticElement(285, 246, 48, 95, 117, 79),
+		StaticElement(285, 1, 40, 62, 0, 210),
+		StaticElement(284, 1, 41, 62, 11, 273),
+		StaticElement(614, 104, 100, 100, 91, 245),
+		MouseMoveElement(0, 614, 207, 20, 20, 132, 284, 50),
+		MouseButtonElement(1, 1, 178, 139, 174, 2, 0, true, 2),
+		MouseButtonElement(2, 143, 178, 139, 174, 146, 0, true, 2),
+		MouseButtonElement(3, 336, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(1, 387, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(2, 438, 246, 48, 95, 117, 79, true, 2),
+		MouseButtonElement(5, 285, 66, 40, 62, 0, 210, true, 2),
+		MouseButtonElement(4, 285, 66, 40, 62, 11, 273, true, 2),
+	};
+
+	const SKeystrokesElement gs_aMouseDotDotElements[] = {
+		StaticElement(328, 1, 283, 242, 1, 179),
+		StaticElement(1, 1, 139, 174, 2, 0),
+		StaticElement(143, 1, 139, 174, 146, 0),
+		StaticElement(285, 246, 48, 95, 117, 79),
+		StaticElement(285, 1, 40, 62, 0, 210),
+		StaticElement(284, 1, 41, 62, 11, 273),
+		StaticElement(493, 245, 100, 100, 91, 245),
+		MouseMoveElement(0, 614, 207, 20, 20, 132, 284, 50),
+		MouseButtonElement(1, 1, 178, 139, 174, 2, 0, true, 2),
+		MouseButtonElement(2, 143, 178, 139, 174, 146, 0, true, 2),
+		MouseButtonElement(3, 336, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(1, 387, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(2, 438, 246, 48, 95, 117, 79, true, 2),
+		MouseButtonElement(5, 285, 66, 40, 62, 0, 210, true, 2),
+		MouseButtonElement(4, 285, 66, 40, 62, 11, 273, true, 2),
+	};
+
+	const SKeystrokesElement gs_aMouseDotNoBoxElements[] = {
+		StaticElement(328, 1, 283, 242, 1, 179),
+		StaticElement(1, 1, 139, 174, 2, 0),
+		StaticElement(143, 1, 139, 174, 146, 0),
+		StaticElement(285, 246, 48, 95, 117, 79),
+		StaticElement(285, 1, 40, 62, 0, 210),
+		StaticElement(284, 1, 41, 62, 11, 273),
+		StaticElement(614, 244, 100, 100, 91, 245),
+		MouseMoveElement(0, 614, 207, 20, 20, 132, 284, 50),
+		MouseButtonElement(1, 1, 178, 139, 174, 2, 0, true, 2),
+		MouseButtonElement(2, 143, 178, 139, 174, 146, 0, true, 2),
+		MouseButtonElement(3, 336, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(1, 387, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(2, 438, 246, 48, 95, 117, 79, true, 2),
+		MouseButtonElement(5, 285, 66, 40, 62, 0, 210, true, 2),
+		MouseButtonElement(4, 285, 66, 40, 62, 11, 273, true, 2),
+	};
+
+	const SKeystrokesElement gs_aMouseNoMovementElements[] = {
+		StaticElement(328, 1, 283, 242, 2, 179),
+		StaticElement(1, 1, 139, 174, 2, 0),
+		StaticElement(143, 1, 139, 174, 146, 0),
+		MouseButtonElement(1, 1, 178, 139, 174, 2, 0, true, 2),
+		MouseButtonElement(2, 143, 178, 139, 174, 146, 0, true, 2),
+		StaticElement(285, 246, 48, 95, 117, 79),
+		MouseButtonElement(3, 336, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(1, 387, 246, 48, 95, 117, 79, true, 2),
+		WheelElement(2, 438, 246, 48, 95, 117, 79, true, 2),
+		MouseButtonElement(5, 285, 1, 40, 62, 0, 210),
+		MouseButtonElement(4, 284, 1, 41, 62, 11, 273),
+	};
+
+	const SKeystrokesOverlayPreset gs_aMousePresets[] = {
+		{285, 421, 0, KEYSTROKES_MOUSE_ATLAS_WIDTH, KEYSTROKES_MOUSE_ATLAS_HEIGHT, gs_aMouseDotElements, ArrayCount(gs_aMouseDotElements)},
+		{285, 421, 0, KEYSTROKES_MOUSE_ATLAS_WIDTH, KEYSTROKES_MOUSE_ATLAS_HEIGHT, gs_aMouseArrowElements, ArrayCount(gs_aMouseArrowElements)},
+		{285, 421, 0, KEYSTROKES_MOUSE_ATLAS_WIDTH, KEYSTROKES_MOUSE_ATLAS_HEIGHT, gs_aMouseDotDotElements, ArrayCount(gs_aMouseDotDotElements)},
+		{285, 421, 0, KEYSTROKES_MOUSE_ATLAS_WIDTH, KEYSTROKES_MOUSE_ATLAS_HEIGHT, gs_aMouseDotNoBoxElements, ArrayCount(gs_aMouseDotNoBoxElements)},
+		{285, 421, 0, KEYSTROKES_MOUSE_ATLAS_WIDTH, KEYSTROKES_MOUSE_ATLAS_HEIGHT, gs_aMouseNoMovementElements, ArrayCount(gs_aMouseNoMovementElements)},
+	};
+
+	const SKeystrokesOverlayPreset &GetKeystrokesKeyboardPreset(int Preset)
+	{
+		return gs_aKeyboardPresets[std::clamp(Preset, 0, ArrayCount(gs_aKeyboardPresets) - 1)];
+	}
+
+	const SKeystrokesOverlayPreset &GetKeystrokesMousePreset(int Preset)
+	{
+		return gs_aMousePresets[std::clamp(Preset, 0, ArrayCount(gs_aMousePresets) - 1)];
+	}
+
+	bool IsKeystrokesPressed(IInput *pInput, int PrimaryKey, int SecondaryKey = 0)
+	{
+		return (PrimaryKey > 0 && pInput->KeyIsPressed(PrimaryKey)) ||
+		       (SecondaryKey > 0 && pInput->KeyIsPressed(SecondaryKey));
+	}
+
+	bool IsKeystrokesPressed(const CNetObj_PlayerInput *pInput, int PrimaryKey, int SecondaryKey = 0)
+	{
+		if(pInput == nullptr)
+			return false;
+
+		auto IsPressed = [pInput](int Key) {
+			switch(Key)
+			{
+			case KEY_A:
+				return pInput->m_Direction < 0;
+			case KEY_D:
+				return pInput->m_Direction > 0;
+			case KEY_W:
+			case KEY_SPACE:
+				return pInput->m_Jump != 0;
+			case KEY_Q:
+				return pInput->m_PrevWeapon != 0;
+			case KEY_E:
+				return pInput->m_NextWeapon != 0;
+			default:
+				return false;
+			}
+		};
+
+		return IsPressed(PrimaryKey) || IsPressed(SecondaryKey);
+	}
+
+	bool IsKeystrokesPressed(const CNetObj_Character *pCharacter, int PrimaryKey, int SecondaryKey = 0)
+	{
+		if(pCharacter == nullptr)
+			return false;
+
+		auto IsPressed = [pCharacter](int Key) {
+			switch(Key)
+			{
+			case KEY_A:
+				return pCharacter->m_Direction < 0;
+			case KEY_D:
+				return pCharacter->m_Direction > 0;
+			case KEY_W:
+			case KEY_SPACE:
+				return (pCharacter->m_Jumped & 1) != 0;
+			default:
+				return false;
+			}
+		};
+
+		return IsPressed(PrimaryKey) || IsPressed(SecondaryKey);
+	}
+
+	bool IsKeystrokesMouseButtonPressed(IInput *pInput, int MouseButton)
+	{
+		if(MouseButton <= 0)
+			return false;
+
+		switch(MouseButton)
+		{
+		case 1:
+			return pInput->KeyIsPressed(KEY_MOUSE_1);
+		case 2:
+			return pInput->KeyIsPressed(KEY_MOUSE_2);
+		case 3:
+			return pInput->KeyIsPressed(KEY_MOUSE_3);
+		case 4:
+			return pInput->KeyIsPressed(KEY_MOUSE_4);
+		case 5:
+			return pInput->KeyIsPressed(KEY_MOUSE_5);
+		case 6:
+			return pInput->KeyIsPressed(KEY_MOUSE_6);
+		case 7:
+			return pInput->KeyIsPressed(KEY_MOUSE_7);
+		case 8:
+			return pInput->KeyIsPressed(KEY_MOUSE_8);
+		case 9:
+			return pInput->KeyIsPressed(KEY_MOUSE_9);
+		default:
+			return false;
+		}
+	}
+
+	bool IsKeystrokesMouseButtonPressed(const CNetObj_PlayerInput *pInput, int MouseButton)
+	{
+		if(pInput == nullptr || MouseButton <= 0)
+			return false;
+
+		switch(MouseButton)
+		{
+		case 1:
+			return (pInput->m_Fire & 1) != 0;
+		case 2:
+			return pInput->m_Hook != 0;
+		default:
+			return false;
+		}
+	}
+
+	bool IsKeystrokesWheelActive(int WheelDir, int64_t Now, int64_t WheelUpEndTime, int64_t WheelDownEndTime)
+	{
+		switch(WheelDir)
+		{
+		case 1:
+			return WheelUpEndTime > Now;
+		case 2:
+			return WheelDownEndTime > Now;
+		default:
+			return WheelUpEndTime > Now || WheelDownEndTime > Now;
+		}
+	}
+
+	bool GetKeystrokesTrackedAim(const CGameClient *pGameClient, int TrackedClientId, float Intra, vec2 &OutAim)
+	{
+		if(pGameClient == nullptr || !in_range(TrackedClientId, 0, MAX_CLIENTS - 1))
+			return false;
+
+		const auto &Character = pGameClient->m_Snap.m_aCharacters[TrackedClientId];
+		if(!Character.m_Active)
+			return false;
+
+		if(Character.m_HasExtendedDisplayInfo)
+		{
+			const CNetObj_DDNetCharacter *pExtendedData = &Character.m_ExtendedData;
+			const CNetObj_DDNetCharacter *pPrevExtendedData = Character.m_pPrevExtendedData;
+			if(pPrevExtendedData != nullptr)
+			{
+				OutAim = vec2(
+					mix((float)pPrevExtendedData->m_TargetX, (float)pExtendedData->m_TargetX, Intra),
+					mix((float)pPrevExtendedData->m_TargetY, (float)pExtendedData->m_TargetY, Intra));
+			}
+			else
+			{
+				OutAim = vec2((float)pExtendedData->m_TargetX, (float)pExtendedData->m_TargetY);
+			}
+			return length(OutAim) > 0.001f;
+		}
+
+		float Angle = 0.0f;
+		if(Character.m_Cur.m_Angle > (256.0f * pi) && Character.m_Prev.m_Angle < 0)
+			Angle = mix((float)Character.m_Prev.m_Angle, (float)(Character.m_Cur.m_Angle - 256.0f * 2 * pi), Intra) / 256.0f;
+		else if(Character.m_Cur.m_Angle < 0 && Character.m_Prev.m_Angle > (256.0f * pi))
+			Angle = mix((float)Character.m_Prev.m_Angle, (float)(Character.m_Cur.m_Angle + 256.0f * 2 * pi), Intra) / 256.0f;
+		else
+			Angle = mix((float)Character.m_Prev.m_Angle, (float)Character.m_Cur.m_Angle, Intra) / 256.0f;
+
+		OutAim = direction(Angle) * 256.0f;
+		return true;
+	}
+
+	bool IsKeystrokesMouseButtonPressedFromCharacter(const CNetObj_Character *pPrevCharacter, const CNetObj_Character *pCharacter, int MouseButton, int64_t Now, int64_t Mouse1EndTime)
+	{
+		if(pCharacter == nullptr || MouseButton <= 0)
+			return false;
+
+		switch(MouseButton)
+		{
+		case 1:
+			return Mouse1EndTime > Now || (pPrevCharacter != nullptr && pPrevCharacter->m_AttackTick != pCharacter->m_AttackTick);
+		case 2:
+			return pCharacter->m_HookState != HOOK_IDLE;
+		default:
+			return false;
+		}
+	}
+
+	float GetKeystrokesScale(const HudLayout::SModuleLayout &Layout)
+	{
+		return std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f) * KEYSTROKES_ATLAS_SCALE;
+	}
+
+	IGraphics::CTextureHandle LoadKeystrokesTexture(IGraphics *pGraphics, IStorage *pStorage, const char *pPrimaryPath, const char *pFilename, const char *pDirectory)
+	{
+		IGraphics::CTextureHandle Texture = pGraphics->LoadTexture(pPrimaryPath, IStorage::TYPE_ALL);
+		if(Texture.IsValid() && !Texture.IsNullTexture())
+			return Texture;
+
+		char aAbsolutePath[IO_MAX_PATH_LENGTH];
+		if(pStorage->FindFile(pFilename, pDirectory, IStorage::TYPE_ALL, aAbsolutePath, sizeof(aAbsolutePath)))
+		{
+			Texture = pGraphics->LoadTexture(aAbsolutePath, IStorage::TYPE_ALL_OR_ABSOLUTE);
+			if(Texture.IsValid() && !Texture.IsNullTexture())
+				return Texture;
+		}
+
+		return pGraphics->LoadTexture(pPrimaryPath, IStorage::TYPE_ALL_OR_ABSOLUTE);
+	}
+
+	void DrawKeystrokesSprite(
+		IGraphics *pGraphics,
+		IGraphics::CTextureHandle Texture,
+		int AtlasWidth,
+		int AtlasHeight,
+		int MapX,
+		int MapY,
+		int MapW,
+		int MapH,
+		float X,
+		float Y,
+		float W,
+		float H,
+		ColorRGBA Color = ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f),
+		float Rotation = 0.0f)
+	{
+		if(!Texture.IsValid() || Texture.IsNullTexture() || W <= 0.0f || H <= 0.0f)
+			return;
+
+		pGraphics->TextureSet(Texture);
+		pGraphics->QuadsBegin();
+		pGraphics->SetColor(Color);
+		pGraphics->QuadsSetSubset(
+			MapX / (float)AtlasWidth,
+			MapY / (float)AtlasHeight,
+			(MapX + MapW) / (float)AtlasWidth,
+			(MapY + MapH) / (float)AtlasHeight);
+		pGraphics->QuadsSetRotation(Rotation);
+		IGraphics::CQuadItem Quad(X + W * 0.5f, Y + H * 0.5f, W, H);
+		pGraphics->QuadsDraw(&Quad, 1);
+		pGraphics->QuadsSetRotation(0.0f);
+		pGraphics->QuadsEnd();
+	}
+
+	void FormatSpeedrunTime(int64_t RemainingMilliseconds, char *pBuf, size_t BufSize)
+	{
+		const int RemainingHours = (int)(RemainingMilliseconds / (60 * 60 * 1000));
+		const int RemainingMinutes = (int)((RemainingMilliseconds / (60 * 1000)) % 60);
+		const int RemainingSeconds = (int)((RemainingMilliseconds / 1000) % 60);
+		const int Milliseconds = (int)(RemainingMilliseconds % 1000);
+		if(RemainingHours > 0)
+			str_format(pBuf, BufSize, "%02d:%02d:%02d.%03d", RemainingHours, RemainingMinutes, RemainingSeconds, Milliseconds);
+		else
+			str_format(pBuf, BufSize, "%02d:%02d.%03d", RemainingMinutes, RemainingSeconds, Milliseconds);
+	}
+
+	void FormatPredictionTime(int64_t Milliseconds, bool ShowMillis, char *pBuf, size_t BufSize)
+	{
+		const int64_t TimeCentiseconds = maximum<int64_t>(0, (Milliseconds + 5) / 10);
+		str_time(TimeCentiseconds, ShowMillis ? ETimeFormat::HOURS_CENTISECS : ETimeFormat::HOURS, pBuf, BufSize);
+	}
+
+	struct SFrozenHudState
+	{
+		int m_NumInTeam = 0;
+		int m_NumFrozen = 0;
+		int m_LocalTeamId = 0;
+		bool m_ShowHud = false;
+	};
+
+	enum EFrozenHudExpandDir
+	{
+		FROZEN_HUD_EXPAND_RIGHT = 0,
+		FROZEN_HUD_EXPAND_LEFT,
+		FROZEN_HUD_EXPAND_CENTER,
+	};
+
+	int FrozenHudExpandDir()
+	{
+		return std::clamp(g_Config.m_TcFrozenHudExpandDir, (int)FROZEN_HUD_EXPAND_RIGHT, (int)FROZEN_HUD_EXPAND_CENTER);
+	}
+
+	SFrozenHudState GetFrozenHudState(const CGameClient *pGameClient, bool ForcePreview)
+	{
+		SFrozenHudState State;
+		if(!pGameClient->m_GameInfo.m_EntitiesDDRace && !ForcePreview)
+			return State;
+
+		if(pGameClient->m_Snap.m_LocalClientId >= 0 && pGameClient->m_Snap.m_SpecInfo.m_SpectatorId >= 0)
+		{
+			if(pGameClient->m_Snap.m_SpecInfo.m_Active == 1 && pGameClient->m_Snap.m_SpecInfo.m_SpectatorId != -1)
+				State.m_LocalTeamId = pGameClient->m_Teams.Team(pGameClient->m_Snap.m_SpecInfo.m_SpectatorId);
+			else
+				State.m_LocalTeamId = pGameClient->m_Teams.Team(pGameClient->m_Snap.m_LocalClientId);
+		}
+
+		for(int i = 0; i < MAX_CLIENTS; i++)
+		{
+			if(!pGameClient->m_Snap.m_apPlayerInfos[i])
+				continue;
+			if(pGameClient->m_Teams.Team(i) != State.m_LocalTeamId)
+				continue;
+
+			State.m_NumInTeam++;
+			if(pGameClient->m_aClients[i].m_FreezeEnd > 0 || pGameClient->m_aClients[i].m_DeepFrozen)
+				State.m_NumFrozen++;
+		}
+
+		State.m_ShowHud = ForcePreview || (g_Config.m_TcShowFrozenHud > 0 && !pGameClient->m_Scoreboard.IsActive() && !(State.m_LocalTeamId == 0 && g_Config.m_TcFrozenHudTeamOnly));
+		if(ForcePreview && State.m_NumInTeam <= 0)
+		{
+			State.m_NumInTeam = 8;
+			State.m_NumFrozen = 3;
+		}
+		return State;
+	}
+}
 
 CHud::CHud()
 {
@@ -33,6 +584,8 @@ CHud::CHud()
 	m_DDRaceEffectsTextContainerIndex.Reset();
 	m_PlayerAngleTextContainerIndex.Reset();
 	m_PlayerPrevAngle = -INFINITY;
+	m_KeystrokesKeyboardTexture = IGraphics::CTextureHandle();
+	m_KeystrokesMouseTexture = IGraphics::CTextureHandle();
 
 	for(int i = 0; i < 2; i++)
 	{
@@ -87,13 +640,494 @@ void CHud::OnReset()
 	m_aLastPlayerSpeedChange[0] = ESpeedChange::NONE;
 	m_aLastPlayerSpeedChange[1] = ESpeedChange::NONE;
 	m_LastSpectatorCountTick = 0;
+	m_SpeedrunTimerExpiredTick = 0;
+	m_vFinishPredictionDistances.clear();
+	m_vFinishPredictionPassable.clear();
+	m_vFinishPredictionStartTiles.clear();
+	m_vFinishPredictionFinishTiles.clear();
+	m_FinishPredictionMapWidth = 0;
+	m_FinishPredictionMapHeight = 0;
+	m_FinishPredictionRaceStartTick = -1;
+	m_FinishPredictionRaceStartDistance = -1.0f;
+	m_FinishPredictionLastProgress = 0.0f;
+	m_FinishPredictionSmoothedFinishTimeMs = -1;
+	m_FinishPredictionLastPredictTick = -1;
+	m_FinishPredictionFinishedRaceTick = -1;
+	m_KeystrokesMouse1EndTime = 0;
+	m_KeystrokesWheelUpEndTime = 0;
+	m_KeystrokesWheelDownEndTime = 0;
 
 	ResetHudContainers();
+}
+
+bool CHud::RebuildFinishPredictionPathData()
+{
+	m_vFinishPredictionDistances.clear();
+	m_vFinishPredictionPassable.clear();
+	m_vFinishPredictionStartTiles.clear();
+	m_vFinishPredictionFinishTiles.clear();
+	m_FinishPredictionMapWidth = 0;
+	m_FinishPredictionMapHeight = 0;
+	m_FinishPredictionRaceStartDistance = -1.0f;
+	m_FinishPredictionLastProgress = 0.0f;
+	m_FinishPredictionSmoothedFinishTimeMs = -1;
+	m_FinishPredictionLastPredictTick = -1;
+	m_FinishPredictionFinishedRaceTick = -1;
+
+	if(!Collision() || Collision()->GetWidth() <= 0 || Collision()->GetHeight() <= 0)
+		return false;
+
+	m_FinishPredictionMapWidth = Collision()->GetWidth();
+	m_FinishPredictionMapHeight = Collision()->GetHeight();
+	const int MapSize = m_FinishPredictionMapWidth * m_FinishPredictionMapHeight;
+	m_vFinishPredictionDistances.assign(MapSize, -1);
+	m_vFinishPredictionPassable.assign(MapSize, 0);
+
+	auto IsPassableTile = [&](int TileX, int TileY) {
+		if(TileX < 0 || TileX >= m_FinishPredictionMapWidth || TileY < 0 || TileY >= m_FinishPredictionMapHeight)
+			return false;
+		const int Index = TileY * m_FinishPredictionMapWidth + TileX;
+		if(m_vFinishPredictionPassable[Index] != 0)
+			return true;
+		const vec2 TileCenter(TileX * 32.0f + 16.0f, TileY * 32.0f + 16.0f);
+		return !Collision()->TestBox(TileCenter, vec2(CCharacterCore::PhysicalSize(), CCharacterCore::PhysicalSize()));
+	};
+
+	for(int y = 0; y < m_FinishPredictionMapHeight; ++y)
+	{
+		for(int x = 0; x < m_FinishPredictionMapWidth; ++x)
+		{
+			const int Index = y * m_FinishPredictionMapWidth + x;
+			m_vFinishPredictionPassable[Index] = IsPassableTile(x, y) ? 1 : 0;
+		}
+	}
+
+	using TDistanceNode = std::pair<int, int>;
+	std::priority_queue<TDistanceNode, std::vector<TDistanceNode>, std::greater<>> PriorityQueue;
+	for(int y = 0; y < m_FinishPredictionMapHeight; ++y)
+	{
+		for(int x = 0; x < m_FinishPredictionMapWidth; ++x)
+		{
+			const int Index = y * m_FinishPredictionMapWidth + x;
+			const bool StartTile = Collision()->GetTileIndex(Index) == TILE_START || Collision()->GetFrontTileIndex(Index) == TILE_START;
+			const bool FinishTile = Collision()->GetTileIndex(Index) == TILE_FINISH || Collision()->GetFrontTileIndex(Index) == TILE_FINISH;
+			if(StartTile)
+				m_vFinishPredictionStartTiles.emplace_back(x, y);
+			if(FinishTile && m_vFinishPredictionPassable[Index] != 0)
+			{
+				m_vFinishPredictionFinishTiles.emplace_back(x, y);
+				m_vFinishPredictionDistances[Index] = 0;
+				PriorityQueue.emplace(0, Index);
+			}
+		}
+	}
+
+	if(PriorityQueue.empty())
+		return false;
+
+	struct SFinishPredictionDir
+	{
+		ivec2 m_Dir;
+		int m_Cost;
+	};
+	static const SFinishPredictionDir s_aDirs[] = {
+		{{1, 0}, 10},
+		{{-1, 0}, 10},
+		{{0, 1}, 10},
+		{{0, -1}, 10},
+		{{1, 1}, 14},
+		{{1, -1}, 14},
+		{{-1, 1}, 14},
+		{{-1, -1}, 14},
+	};
+	while(!PriorityQueue.empty())
+	{
+		const auto [CurDist, Index] = PriorityQueue.top();
+		PriorityQueue.pop();
+		if(Index < 0 || Index >= MapSize || m_vFinishPredictionDistances[Index] != CurDist)
+			continue;
+		const int TileX = Index % m_FinishPredictionMapWidth;
+		const int TileY = Index / m_FinishPredictionMapWidth;
+		for(const SFinishPredictionDir &DirInfo : s_aDirs)
+		{
+			const ivec2 Dir = DirInfo.m_Dir;
+			const int NextX = TileX + Dir.x;
+			const int NextY = TileY + Dir.y;
+			if(NextX < 0 || NextX >= m_FinishPredictionMapWidth || NextY < 0 || NextY >= m_FinishPredictionMapHeight)
+				continue;
+			const int NextIndex = NextY * m_FinishPredictionMapWidth + NextX;
+			if(m_vFinishPredictionPassable[NextIndex] == 0)
+				continue;
+			if(Dir.x != 0 && Dir.y != 0)
+			{
+				const int SideIndexX = TileY * m_FinishPredictionMapWidth + NextX;
+				const int SideIndexY = NextY * m_FinishPredictionMapWidth + TileX;
+				if(m_vFinishPredictionPassable[SideIndexX] == 0 || m_vFinishPredictionPassable[SideIndexY] == 0)
+					continue;
+			}
+
+			const int NextDistance = CurDist + DirInfo.m_Cost;
+			if(m_vFinishPredictionDistances[NextIndex] >= 0 && m_vFinishPredictionDistances[NextIndex] <= NextDistance)
+				continue;
+			m_vFinishPredictionDistances[NextIndex] = NextDistance;
+			PriorityQueue.emplace(NextDistance, NextIndex);
+		}
+	}
+
+	return true;
+}
+
+bool CHud::EnsureFinishPredictionPathData()
+{
+	if(!Collision() || Collision()->GetWidth() <= 0 || Collision()->GetHeight() <= 0)
+		return false;
+	if(m_FinishPredictionMapWidth != Collision()->GetWidth() ||
+		m_FinishPredictionMapHeight != Collision()->GetHeight() ||
+		m_vFinishPredictionDistances.empty())
+		return RebuildFinishPredictionPathData();
+	return !m_vFinishPredictionDistances.empty();
+}
+
+float CHud::GetFinishPredictionDistanceAtPos(vec2 Pos) const
+{
+	if(m_vFinishPredictionDistances.empty() || m_FinishPredictionMapWidth <= 0 || m_FinishPredictionMapHeight <= 0)
+		return -1.0f;
+
+	const int TileX = std::clamp((int)std::floor(Pos.x / 32.0f), 0, m_FinishPredictionMapWidth - 1);
+	const int TileY = std::clamp((int)std::floor(Pos.y / 32.0f), 0, m_FinishPredictionMapHeight - 1);
+
+	float BestDistance = -1.0f;
+	for(int Radius = 0; Radius <= 2; ++Radius)
+	{
+		for(int y = maximum(0, TileY - Radius); y <= minimum(m_FinishPredictionMapHeight - 1, TileY + Radius); ++y)
+		{
+			for(int x = maximum(0, TileX - Radius); x <= minimum(m_FinishPredictionMapWidth - 1, TileX + Radius); ++x)
+			{
+				const int Index = y * m_FinishPredictionMapWidth + x;
+				const int Dist = m_vFinishPredictionDistances[Index];
+				if(Dist < 0)
+					continue;
+				const float OffsetCost = distance(Pos, vec2(x * 32.0f + 16.0f, y * 32.0f + 16.0f)) / 32.0f;
+				const float Total = Dist / 10.0f + OffsetCost;
+				if(BestDistance < 0.0f || Total < BestDistance)
+					BestDistance = Total;
+			}
+		}
+		if(BestDistance >= 0.0f)
+			break;
+	}
+	return BestDistance;
+}
+
+float CHud::GetFinishPredictionStartDistance() const
+{
+	if(m_FinishPredictionRaceStartDistance > 0.0f)
+		return m_FinishPredictionRaceStartDistance;
+
+	float BestDistance = -1.0f;
+	for(const ivec2 &StartTile : m_vFinishPredictionStartTiles)
+	{
+		const int Index = StartTile.y * m_FinishPredictionMapWidth + StartTile.x;
+		if(Index < 0 || Index >= (int)m_vFinishPredictionDistances.size())
+			continue;
+		const int Dist = m_vFinishPredictionDistances[Index];
+		if(Dist < 0)
+			continue;
+		const float DistanceTiles = Dist / 10.0f;
+		if(BestDistance < 0.0f || DistanceTiles < BestDistance)
+			BestDistance = DistanceTiles;
+	}
+	return BestDistance;
+}
+
+int64_t CHud::GetFinishPredictionScoreboardTimeMs(int ClientId) const
+{
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return -1;
+	const CNetObj_PlayerInfo *pPlayerInfo = GameClient()->m_Snap.m_apPlayerInfos[ClientId];
+	if(!pPlayerInfo)
+		return -1;
+
+	const bool Race7 = Client()->IsSixup() && GameClient()->m_Snap.m_pGameInfoObj && (GameClient()->m_Snap.m_pGameInfoObj->m_GameFlags & protocol7::GAMEFLAG_RACE);
+	if(Race7)
+	{
+		if(pPlayerInfo->m_Score == protocol7::FinishTime::NOT_FINISHED)
+			return -1;
+		return maximum<int64_t>(0, pPlayerInfo->m_Score);
+	}
+
+	if(GameClient()->m_GameInfo.m_TimeScore)
+	{
+		if(pPlayerInfo->m_Score == FinishTime::NOT_FINISHED_TIMESCORE)
+			return -1;
+		return maximum<int64_t>(0, pPlayerInfo->m_Score) * 1000;
+	}
+
+	return -1;
+}
+
+int64_t CHud::GetFinishPredictionBestTimeMs() const
+{
+	if(GameClient()->m_MapBestTimeSeconds != FinishTime::UNSET && GameClient()->m_MapBestTimeSeconds != FinishTime::NOT_FINISHED_MILLIS)
+		return (int64_t)GameClient()->m_MapBestTimeSeconds * 1000 + GameClient()->m_MapBestTimeMillis;
+
+	int64_t BestTimeMs = -1;
+	for(int i = 0; i < MAX_CLIENTS; ++i)
+	{
+		const int64_t ScoreTimeMs = GetFinishPredictionScoreboardTimeMs(i);
+		if(ScoreTimeMs <= 0)
+			continue;
+		if(BestTimeMs < 0 || ScoreTimeMs < BestTimeMs)
+			BestTimeMs = ScoreTimeMs;
+	}
+	return BestTimeMs;
+}
+
+int64_t CHud::GetFinishPredictionPersonalBestTimeMs() const
+{
+	const int LocalClientId = GameClient()->m_aLocalIds[g_Config.m_ClDummy];
+	if(GameClient()->m_ReceivedDDNetPlayerFinishTimes && LocalClientId >= 0)
+	{
+		const auto &ClientData = GameClient()->m_aClients[LocalClientId];
+		if(ClientData.m_FinishTimeSeconds != FinishTime::UNSET && ClientData.m_FinishTimeSeconds != FinishTime::NOT_FINISHED_MILLIS)
+			return (int64_t)absolute(ClientData.m_FinishTimeSeconds) * 1000 + (absolute(ClientData.m_FinishTimeMillis) % 1000);
+	}
+
+	const int64_t ScoreboardTimeMs = GetFinishPredictionScoreboardTimeMs(LocalClientId);
+	if(ScoreboardTimeMs > 0)
+		return ScoreboardTimeMs;
+
+	const float PlayerRecord = m_aPlayerRecord[g_Config.m_ClDummy];
+	return PlayerRecord > 0.0f ? (int64_t)round(PlayerRecord * 1000.0f) : -1;
+}
+
+int64_t CHud::GetFinishPredictionAverageTimeMs() const
+{
+	int64_t Sum = 0;
+	int Count = 0;
+	if(GameClient()->m_ReceivedDDNetPlayerFinishTimes)
+	{
+		for(int i = 0; i < MAX_CLIENTS; ++i)
+		{
+			if(!GameClient()->m_Snap.m_apPlayerInfos[i])
+				continue;
+			const auto &ClientData = GameClient()->m_aClients[i];
+			if(ClientData.m_FinishTimeSeconds == FinishTime::UNSET || ClientData.m_FinishTimeSeconds == FinishTime::NOT_FINISHED_MILLIS)
+				continue;
+			Sum += (int64_t)absolute(ClientData.m_FinishTimeSeconds) * 1000 + (absolute(ClientData.m_FinishTimeMillis) % 1000);
+			++Count;
+		}
+	}
+	else
+	{
+		for(int i = 0; i < MAX_CLIENTS; ++i)
+		{
+			const int64_t ScoreTimeMs = GetFinishPredictionScoreboardTimeMs(i);
+			if(ScoreTimeMs <= 0)
+				continue;
+			Sum += ScoreTimeMs;
+			++Count;
+		}
+	}
+	return Count > 0 ? Sum / Count : -1;
+}
+
+void CHud::ResetFinishPredictionState(bool ClearFinishedRace) const
+{
+	m_FinishPredictionRaceStartTick = -1;
+	m_FinishPredictionRaceStartDistance = -1.0f;
+	m_FinishPredictionLastProgress = 0.0f;
+	m_FinishPredictionSmoothedFinishTimeMs = -1;
+	m_FinishPredictionLastPredictTick = -1;
+	if(ClearFinishedRace)
+		m_FinishPredictionFinishedRaceTick = -1;
+}
+
+bool CHud::GetFinishPredictionState(SFinishPredictionState &State, bool ForcePreview) const
+{
+	State = {};
+	if(ForcePreview)
+	{
+		State.m_Valid = true;
+		State.m_HasPredictedTime = true;
+		State.m_Progress = 0.051f;
+		State.m_CurrentTimeMs = 68420;
+		State.m_PredictedFinishTimeMs = 118300;
+		State.m_RemainingTimeMs = State.m_PredictedFinishTimeMs - State.m_CurrentTimeMs;
+		return true;
+	}
+
+	if(GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_GAMEPLAY_FINISH_PREDICTION) ||
+		g_Config.m_BcFinishPrediction == 0 ||
+		!GameClient()->m_Snap.m_pLocalCharacter ||
+		GameClient()->m_Snap.m_SpecInfo.m_Active)
+	{
+		ResetFinishPredictionState();
+		return false;
+	}
+
+	if(GameClient()->LastRaceTick() < 0)
+	{
+		if(g_Config.m_BcFinishPredictionShowAlways == 0)
+			return false;
+		ResetFinishPredictionState();
+		State.m_Valid = true;
+		State.m_Progress = 0.0f;
+		State.m_CurrentTimeMs = 0;
+		State.m_PredictedFinishTimeMs = 0;
+		State.m_RemainingTimeMs = 0;
+		return true;
+	}
+
+	if(m_FinishPredictionFinishedRaceTick == GameClient()->LastRaceTick())
+	{
+		ResetFinishPredictionState(false);
+		if(g_Config.m_BcFinishPredictionShowAlways == 0)
+			return false;
+		State.m_Valid = true;
+		State.m_Progress = 0.0f;
+		State.m_CurrentTimeMs = 0;
+		State.m_PredictedFinishTimeMs = 0;
+		State.m_RemainingTimeMs = 0;
+		return true;
+	}
+
+	if(!const_cast<CHud *>(this)->EnsureFinishPredictionPathData())
+	{
+		State.m_Valid = true;
+		State.m_HasPredictedTime = false;
+		State.m_Progress = maximum(0.0f, m_FinishPredictionLastProgress);
+		State.m_CurrentTimeMs = maximum<int64_t>(0, (int64_t)(Client()->GameTick(g_Config.m_ClDummy) - GameClient()->LastRaceTick()) * 1000 / maximum(1, Client()->GameTickSpeed()));
+		State.m_PredictedFinishTimeMs = 0;
+		State.m_RemainingTimeMs = 0;
+		return true;
+	}
+
+	const int CurrentTick = Client()->GameTick(g_Config.m_ClDummy);
+	const int RaceStartTick = GameClient()->LastRaceTick();
+	State.m_CurrentTimeMs = maximum<int64_t>(0, (int64_t)(CurrentTick - RaceStartTick) * 1000 / maximum(1, Client()->GameTickSpeed()));
+	const vec2 LocalPos(GameClient()->m_Snap.m_pLocalCharacter->m_X, GameClient()->m_Snap.m_pLocalCharacter->m_Y);
+	const float CurrentDistance = GetFinishPredictionDistanceAtPos(LocalPos);
+	if(CurrentDistance < 0.0f)
+	{
+		State.m_Valid = true;
+		State.m_Progress = maximum(0.0f, m_FinishPredictionLastProgress);
+		return true;
+	}
+
+	if(m_FinishPredictionRaceStartTick != RaceStartTick)
+	{
+		const_cast<CHud *>(this)->m_FinishPredictionFinishedRaceTick = -1;
+		const_cast<CHud *>(this)->m_FinishPredictionRaceStartTick = RaceStartTick;
+		const_cast<CHud *>(this)->m_FinishPredictionRaceStartDistance = maximum(CurrentDistance, GetFinishPredictionStartDistance());
+		const_cast<CHud *>(this)->m_FinishPredictionLastProgress = 0.0f;
+		const_cast<CHud *>(this)->m_FinishPredictionSmoothedFinishTimeMs = -1;
+		const_cast<CHud *>(this)->m_FinishPredictionLastPredictTick = -1;
+	}
+
+	const float StartDistance = m_FinishPredictionRaceStartDistance > 0.0f ?
+					    maximum(m_FinishPredictionRaceStartDistance, 1.0f) :
+					    maximum(GetFinishPredictionStartDistance(), CurrentDistance);
+	if(StartDistance <= 0.0f)
+	{
+		State.m_Valid = true;
+		State.m_Progress = maximum(0.0f, m_FinishPredictionLastProgress);
+		return true;
+	}
+
+	State.m_Progress = std::clamp(1.0f - CurrentDistance / StartDistance, 0.0f, 1.0f);
+	if(CurrentDistance <= 0.5f)
+		State.m_Progress = 1.0f;
+	const_cast<CHud *>(this)->m_FinishPredictionLastProgress = State.m_Progress;
+
+	const int64_t CurrentPacePrediction = State.m_Progress > 0.015f && State.m_CurrentTimeMs > 1500 ?
+						      (int64_t)(State.m_CurrentTimeMs / maximum(State.m_Progress, 0.015f)) :
+						      -1;
+	const int64_t BestTimeMs = GetFinishPredictionBestTimeMs();
+	const int64_t PersonalBestTimeMs = GetFinishPredictionPersonalBestTimeMs();
+	const int64_t AverageTimeMs = GetFinishPredictionAverageTimeMs();
+
+	int64_t ReferenceTimeMs = -1;
+	if(BestTimeMs > 0 && AverageTimeMs > 0 && PersonalBestTimeMs > 0)
+		ReferenceTimeMs = (BestTimeMs + AverageTimeMs + PersonalBestTimeMs) / 3;
+	else if(BestTimeMs > 0 && AverageTimeMs > 0)
+		ReferenceTimeMs = (BestTimeMs + AverageTimeMs) / 2;
+	else if(PersonalBestTimeMs > 0 && AverageTimeMs > 0)
+		ReferenceTimeMs = (PersonalBestTimeMs + AverageTimeMs) / 2;
+	else if(BestTimeMs > 0 && PersonalBestTimeMs > 0)
+		ReferenceTimeMs = (BestTimeMs + PersonalBestTimeMs) / 2;
+	else if(BestTimeMs > 0)
+		ReferenceTimeMs = BestTimeMs;
+	else if(PersonalBestTimeMs > 0)
+		ReferenceTimeMs = PersonalBestTimeMs;
+	else if(AverageTimeMs > 0)
+		ReferenceTimeMs = AverageTimeMs;
+
+	if(State.m_Progress >= 0.999f)
+	{
+		State.m_PredictedFinishTimeMs = State.m_CurrentTimeMs;
+		State.m_HasPredictedTime = true;
+		const_cast<CHud *>(this)->m_FinishPredictionSmoothedFinishTimeMs = State.m_PredictedFinishTimeMs;
+		const_cast<CHud *>(this)->m_FinishPredictionLastPredictTick = CurrentTick;
+	}
+	else if(CurrentPacePrediction > 0 && ReferenceTimeMs > 0)
+	{
+		const float ProgressConfidence = std::clamp((State.m_Progress - 0.04f) / 0.34f, 0.0f, 1.0f);
+		const float TimeConfidence = std::clamp(State.m_CurrentTimeMs / 45000.0f, 0.0f, 1.0f);
+		const float Blend = std::clamp(ProgressConfidence * 0.78f + TimeConfidence * 0.22f, 0.0f, 0.96f);
+		State.m_PredictedFinishTimeMs = (int64_t)mix((float)ReferenceTimeMs, (float)CurrentPacePrediction, Blend);
+		State.m_HasPredictedTime = true;
+	}
+	else if(CurrentPacePrediction > 0)
+	{
+		State.m_PredictedFinishTimeMs = CurrentPacePrediction;
+		State.m_HasPredictedTime = true;
+	}
+	else if(ReferenceTimeMs > 0)
+	{
+		State.m_PredictedFinishTimeMs = ReferenceTimeMs;
+		State.m_HasPredictedTime = true;
+	}
+	else
+		State.m_PredictedFinishTimeMs = 0;
+
+	if(State.m_HasPredictedTime)
+	{
+		State.m_PredictedFinishTimeMs = maximum(State.m_PredictedFinishTimeMs, State.m_CurrentTimeMs);
+		if(State.m_Progress < 0.999f)
+		{
+			if(m_FinishPredictionSmoothedFinishTimeMs < 0)
+			{
+				const_cast<CHud *>(this)->m_FinishPredictionSmoothedFinishTimeMs = State.m_PredictedFinishTimeMs;
+				const_cast<CHud *>(this)->m_FinishPredictionLastPredictTick = CurrentTick;
+			}
+			else if(m_FinishPredictionLastPredictTick != CurrentTick)
+			{
+				const int TickDelta = maximum(1, CurrentTick - maximum(0, m_FinishPredictionLastPredictTick));
+				const float Follow = State.m_PredictedFinishTimeMs < m_FinishPredictionSmoothedFinishTimeMs ? 0.075f : 0.045f;
+				const float Blend = std::clamp(TickDelta * Follow, 0.035f, 0.30f);
+				const_cast<CHud *>(this)->m_FinishPredictionSmoothedFinishTimeMs = (int64_t)mix((float)m_FinishPredictionSmoothedFinishTimeMs, (float)State.m_PredictedFinishTimeMs, Blend);
+				const_cast<CHud *>(this)->m_FinishPredictionLastPredictTick = CurrentTick;
+			}
+			State.m_PredictedFinishTimeMs = maximum<int64_t>(m_FinishPredictionSmoothedFinishTimeMs, State.m_CurrentTimeMs);
+		}
+		State.m_RemainingTimeMs = maximum<int64_t>(0, State.m_PredictedFinishTimeMs - State.m_CurrentTimeMs);
+	}
+	else
+		State.m_RemainingTimeMs = 0;
+	State.m_Valid = true;
+	return true;
 }
 
 void CHud::OnInit()
 {
 	OnReset();
+	m_KeystrokesKeyboardTexture = LoadKeystrokesTexture(Graphics(), Storage(), "BestClient/keystrokes/wasd.png", "wasd.png", "BestClient/keystrokes");
+	m_KeystrokesMouseTexture = LoadKeystrokesTexture(Graphics(), Storage(), "BestClient/keystrokes/mouse.png", "mouse.png", "BestClient/keystrokes");
+	if(m_KeystrokesKeyboardTexture.IsNullTexture())
+		log_warn("keystrokes", "Failed to load keyboard keystrokes texture");
+	if(m_KeystrokesMouseTexture.IsNullTexture())
+		log_warn("keystrokes", "Failed to load mouse keystrokes texture");
 
 	Graphics()->SetColor(1.0, 1.0, 1.0, 1.0);
 
@@ -119,7 +1153,10 @@ void CHud::OnInit()
 
 void CHud::RenderGameTimer()
 {
-	float Half = m_Width / 2.0f;
+	const bool MusicPlayerComponentDisabled = GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_VISUALS_MUSIC_PLAYER);
+	const bool MusicPlayerOccupiesTimerSlot = !MusicPlayerComponentDisabled && g_Config.m_BcMusicPlayer != 0 && !(g_Config.m_ClFocusMode && g_Config.m_ClFocusModeHideSongPlayer);
+	if(MusicPlayerOccupiesTimerSlot)
+		return;
 
 	if(!(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_SUDDENDEATH))
 	{
@@ -148,13 +1185,15 @@ void CHud::RenderGameTimer()
 		static float s_TextWidth00D = TextRender()->TextWidth(FontSize, "00d 00:00:00", -1, -1.0f);
 		static float s_TextWidth000D = TextRender()->TextWidth(FontSize, "000d 00:00:00", -1, -1.0f);
 		float w = Time >= 3600 * 24 * 100 ? s_TextWidth000D : (Time >= 3600 * 24 * 10 ? s_TextWidth00D : (Time >= 3600 * 24 ? s_TextWidth0D : (Time >= 3600 ? s_TextWidthH : s_TextWidthM)));
+		const float Half = m_Width / 2.0f;
+		const float TextY = 2.0f;
 		// last 60 sec red, last 10 sec blink
 		if(GameClient()->m_Snap.m_pGameInfoObj->m_TimeLimit && Time <= 60 && (GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer <= 0))
 		{
 			float Alpha = Time <= 10 && (2 * time() / time_freq()) % 2 ? 0.5f : 1.0f;
 			TextRender()->TextColor(1.0f, 0.25f, 0.25f, Alpha);
 		}
-		TextRender()->Text(Half - w / 2, 2, FontSize, aBuf, -1.0f);
+		TextRender()->Text(Half - w / 2.0f, TextY, FontSize, aBuf, -1.0f);
 		TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
 	}
 }
@@ -183,327 +1222,291 @@ void CHud::RenderSuddenDeath()
 	}
 }
 
-void CHud::RenderScoreHud()
+CUIRect CHud::GetScoreHudRect(bool ForcePreview) const
 {
-	// render small score hud
-	if(!(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER))
-	{
-		float StartY = 229.0f; // the height of this display is 56, so EndY is 285
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_SCORE))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+	if(!ForcePreview && !g_Config.m_ClShowhudScore)
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+	if(!ForcePreview && (GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
 
-		const float ScoreSingleBoxHeight = 18.0f;
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_SCORE, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float Width = 112.0f * Scale;
+	const float Height = 56.0f * Scale;
+	HudLayout::SModuleRect RawRect;
+	if(!HudLayout::HasRuntimeOverride(HudLayout::MODULE_SCORE))
+		RawRect = {m_Width - Width, 285.0f - Height, Width, Height, 5.0f * Scale};
+	else
+		RawRect = {Layout.m_X, Layout.m_Y, Width, Height, 5.0f * Scale};
+	const auto Rect = HudLayout::ClampRectToScreen(RawRect, m_Width, m_Height);
+	return {Rect.m_X, Rect.m_Y, Rect.m_W, Rect.m_H};
+}
 
-		bool ForceScoreInfoInit = !m_aScoreInfo[0].m_Initialized || !m_aScoreInfo[1].m_Initialized;
-		m_aScoreInfo[0].m_Initialized = m_aScoreInfo[1].m_Initialized = true;
+void CHud::RenderScoreHud(bool ForcePreview)
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_SCORE))
+		return;
+	if(!ForcePreview && (GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER))
+		return;
 
-		if(GameClient()->IsTeamPlay() && GameClient()->m_Snap.m_pGameDataObj)
+	const CUIRect Rect = GetScoreHudRect(ForcePreview);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
+		return;
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_SCORE, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float RightEdge = Rect.x + Rect.w;
+	const float BaseY = Rect.y;
+	const float ScoreSingleBoxHeight = 18.0f * Scale;
+	const float ScoreTextSize = 14.0f * Scale;
+	const float NameTextSize = 8.0f * Scale;
+	const float RankTextSize = 10.0f * Scale;
+	const float RowStep = 28.0f * Scale;
+	const float Split = 3.0f * Scale;
+	const float Rounding = 5.0f * Scale;
+
+	auto DrawScoreBox = [&](float X, float Y, float W, float H, const ColorRGBA &Color) {
+		const int Corners = HudLayout::BackgroundCorners(IGraphics::CORNER_ALL, X, Y, W, H, m_Width, m_Height);
+		Graphics()->DrawRect(X, Y, W, H, ThemeHudColor(GameClient(), Color, ForcePreview, 1.0f), Corners, Rounding);
+	};
+
+	// BestClient: render the player name, applying the skin-color gradient when enabled
+	auto RenderPlayerName = [&](int Id, float X, float Y, float Size, const char *pName) {
+		CTextCursor Cursor;
+		Cursor.SetPosition(vec2(X, Y));
+		Cursor.m_FontSize = Size;
+		if(Id >= 0 && Id < MAX_CLIENTS && g_Config.m_BcNameplateGradient)
 		{
-			char aScoreTeam[2][16];
-			str_format(aScoreTeam[TEAM_RED], sizeof(aScoreTeam[TEAM_RED]), "%d", GameClient()->m_Snap.m_pGameDataObj->m_TeamscoreRed);
-			str_format(aScoreTeam[TEAM_BLUE], sizeof(aScoreTeam[TEAM_BLUE]), "%d", GameClient()->m_Snap.m_pGameDataObj->m_TeamscoreBlue);
-
-			bool aRecreateTeamScore[2] = {str_comp(aScoreTeam[0], m_aScoreInfo[0].m_aScoreText) != 0, str_comp(aScoreTeam[1], m_aScoreInfo[1].m_aScoreText) != 0};
-
-			const int aFlagCarrier[2] = {
-				GameClient()->m_Snap.m_pGameDataObj->m_FlagCarrierRed,
-				GameClient()->m_Snap.m_pGameDataObj->m_FlagCarrierBlue};
-
-			bool RecreateRect = ForceScoreInfoInit;
-			for(int t = 0; t < 2; t++)
+			const auto &RenderInfo = GameClient()->m_aClients[Id].m_RenderInfo;
+			ColorRGBA Body, Feet;
+			if(RenderInfo.m_CustomColoredSkin)
 			{
-				if(aRecreateTeamScore[t])
+				Body = RenderInfo.m_ColorBody;
+				Feet = RenderInfo.m_ColorFeet;
+			}
+			else
+			{
+				Body = RenderInfo.m_BloodColor;
+				Feet = ColorRGBA(1, 1, 1);
+			}
+			size_t ByteSize, Count;
+			str_utf8_stats(pName, str_length(pName) + 1, SIZE_MAX, &ByteSize, &Count);
+			if(Count > 1)
+			{
+				const char *pStr = pName;
+				for(size_t i = 0; i < Count; i++)
 				{
-					m_aScoreInfo[t].m_ScoreTextWidth = TextRender()->TextWidth(14.0f, aScoreTeam[t == 0 ? TEAM_RED : TEAM_BLUE], -1, -1.0f);
-					str_copy(m_aScoreInfo[t].m_aScoreText, aScoreTeam[t == 0 ? TEAM_RED : TEAM_BLUE]);
-					RecreateRect = true;
+					int ByteOffset = (int)(pStr - pName);
+					const char *pPrev = pStr;
+					str_utf8_decode(&pStr);
+					int ByteLen = (int)(pStr - pPrev);
+					float t = (float)i / (float)(Count - 1);
+					ColorRGBA Col(Body.r + t * (Feet.r - Body.r), Body.g + t * (Feet.g - Body.g), Body.b + t * (Feet.b - Body.b), 1.0f);
+					Cursor.m_vColorSplits.emplace_back(Cursor.m_CharCount + ByteOffset, ByteLen, Col);
 				}
 			}
-
-			static float s_TextWidth100 = TextRender()->TextWidth(14.0f, "100", -1, -1.0f);
-			float ScoreWidthMax = maximum(maximum(m_aScoreInfo[0].m_ScoreTextWidth, m_aScoreInfo[1].m_ScoreTextWidth), s_TextWidth100);
-			float Split = 3.0f;
-			float ImageSize = (GameClient()->m_Snap.m_pGameInfoObj->m_GameFlags & GAMEFLAG_FLAGS) ? 16.0f : Split;
-			for(int t = 0; t < 2; t++)
+			else if(Count == 1)
 			{
-				// draw box
-				if(RecreateRect)
-				{
-					Graphics()->DeleteQuadContainer(m_aScoreInfo[t].m_RoundRectQuadContainerIndex);
-
-					if(t == 0)
-						Graphics()->SetColor(0.975f, 0.17f, 0.17f, 0.3f);
-					else
-						Graphics()->SetColor(0.17f, 0.46f, 0.975f, 0.3f);
-					m_aScoreInfo[t].m_RoundRectQuadContainerIndex = Graphics()->CreateRectQuadContainer(m_Width - ScoreWidthMax - ImageSize - 2 * Split, StartY + t * 20, ScoreWidthMax + ImageSize + 2 * Split, ScoreSingleBoxHeight, 5.0f, IGraphics::CORNER_L);
-				}
-				Graphics()->TextureClear();
-				Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
-				if(m_aScoreInfo[t].m_RoundRectQuadContainerIndex != -1)
-					Graphics()->RenderQuadContainer(m_aScoreInfo[t].m_RoundRectQuadContainerIndex, -1);
-
-				// draw score
-				if(aRecreateTeamScore[t])
-				{
-					CTextCursor Cursor;
-					Cursor.SetPosition(vec2(m_Width - ScoreWidthMax + (ScoreWidthMax - m_aScoreInfo[t].m_ScoreTextWidth) / 2 - Split, StartY + t * 20 + (18.f - 14.f) / 2.f));
-					Cursor.m_FontSize = 14.0f;
-					TextRender()->RecreateTextContainer(m_aScoreInfo[t].m_TextScoreContainerIndex, &Cursor, aScoreTeam[t]);
-				}
-				if(m_aScoreInfo[t].m_TextScoreContainerIndex.Valid())
-				{
-					ColorRGBA TColor(1.f, 1.f, 1.f, 1.f);
-					ColorRGBA TOutlineColor(0.f, 0.f, 0.f, 0.3f);
-					TextRender()->RenderTextContainer(m_aScoreInfo[t].m_TextScoreContainerIndex, TColor, TOutlineColor);
-				}
-
-				if(GameClient()->m_Snap.m_pGameInfoObj->m_GameFlags & GAMEFLAG_FLAGS)
-				{
-					int BlinkTimer = (GameClient()->m_aFlagDropTick[t] != 0 &&
-								 (Client()->GameTick(g_Config.m_ClDummy) - GameClient()->m_aFlagDropTick[t]) / Client()->GameTickSpeed() >= 25) ?
-								 10 :
-								 20;
-					if(aFlagCarrier[t] == FLAG_ATSTAND || (aFlagCarrier[t] == FLAG_TAKEN && ((Client()->GameTick(g_Config.m_ClDummy) / BlinkTimer) & 1)))
-					{
-						// draw flag
-						Graphics()->TextureSet(t == 0 ? GameClient()->m_GameSkin.m_SpriteFlagRed : GameClient()->m_GameSkin.m_SpriteFlagBlue);
-						Graphics()->SetColor(1.f, 1.f, 1.f, 1.f);
-						Graphics()->RenderQuadContainerAsSprite(m_HudQuadContainerIndex, m_FlagOffset, m_Width - ScoreWidthMax - ImageSize, StartY + 1.0f + t * 20);
-					}
-					else if(aFlagCarrier[t] >= 0)
-					{
-						// draw name of the flag holder
-						int Id = aFlagCarrier[t] % MAX_CLIENTS;
-						const char *pName = GameClient()->m_aClients[Id].m_aName;
-						if(str_comp(pName, m_aScoreInfo[t].m_aPlayerNameText) != 0 || RecreateRect)
-						{
-							str_copy(m_aScoreInfo[t].m_aPlayerNameText, pName);
-
-							float w = TextRender()->TextWidth(8.0f, pName, -1, -1.0f);
-
-							CTextCursor Cursor;
-							Cursor.SetPosition(vec2(minimum(m_Width - w - 1.0f, m_Width - ScoreWidthMax - ImageSize - 2 * Split), StartY + (t + 1) * 20.0f - 2.0f));
-							Cursor.m_FontSize = 8.0f;
-							TextRender()->RecreateTextContainer(m_aScoreInfo[t].m_OptionalNameTextContainerIndex, &Cursor, pName);
-						}
-
-						if(m_aScoreInfo[t].m_OptionalNameTextContainerIndex.Valid())
-						{
-							ColorRGBA TColor(1.f, 1.f, 1.f, 1.f);
-							ColorRGBA TOutlineColor(0.f, 0.f, 0.f, 0.3f);
-							TextRender()->RenderTextContainer(m_aScoreInfo[t].m_OptionalNameTextContainerIndex, TColor, TOutlineColor);
-						}
-
-						// draw tee of the flag holder
-						CTeeRenderInfo TeeInfo = GameClient()->m_aClients[Id].m_RenderInfo;
-						TeeInfo.m_Size = ScoreSingleBoxHeight;
-
-						const CAnimState *pIdleState = CAnimState::GetIdle();
-						vec2 OffsetToMid;
-						CRenderTools::GetRenderTeeOffsetToRenderedTee(pIdleState, &TeeInfo, OffsetToMid);
-						vec2 TeeRenderPos(m_Width - ScoreWidthMax - TeeInfo.m_Size / 2 - Split, StartY + (t * 20) + ScoreSingleBoxHeight / 2.0f + OffsetToMid.y);
-
-						RenderTools()->RenderTee(pIdleState, &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), TeeRenderPos);
-					}
-				}
-				StartY += 8.0f;
+				Cursor.m_vColorSplits.emplace_back(Cursor.m_CharCount, -1, Body);
 			}
 		}
-		else
-		{
-			int Local = -1;
-			int aPos[2] = {1, 2};
-			const CNetObj_PlayerInfo *apPlayerInfo[2] = {nullptr, nullptr};
-			int i = 0;
-			for(int t = 0; t < 2 && i < MAX_CLIENTS && GameClient()->m_Snap.m_apInfoByScore[i]; ++i)
-			{
-				if(GameClient()->m_Snap.m_apInfoByScore[i]->m_Team != TEAM_SPECTATORS)
-				{
-					apPlayerInfo[t] = GameClient()->m_Snap.m_apInfoByScore[i];
-					if(apPlayerInfo[t]->m_ClientId == GameClient()->m_Snap.m_LocalClientId)
-						Local = t;
-					++t;
-				}
-			}
-			// search local player info if not a spectator, nor within top2 scores
-			if(Local == -1 && GameClient()->m_Snap.m_pLocalInfo && GameClient()->m_Snap.m_pLocalInfo->m_Team != TEAM_SPECTATORS)
-			{
-				for(; i < MAX_CLIENTS && GameClient()->m_Snap.m_apInfoByScore[i]; ++i)
-				{
-					if(GameClient()->m_Snap.m_apInfoByScore[i]->m_Team != TEAM_SPECTATORS)
-						++aPos[1];
-					if(GameClient()->m_Snap.m_apInfoByScore[i]->m_ClientId == GameClient()->m_Snap.m_LocalClientId)
-					{
-						apPlayerInfo[1] = GameClient()->m_Snap.m_apInfoByScore[i];
-						Local = 1;
-						break;
-					}
-				}
-			}
-			char aScore[2][16];
-			for(int t = 0; t < 2; ++t)
-			{
-				if(apPlayerInfo[t])
-				{
-					if(Client()->IsSixup() && GameClient()->m_Snap.m_pGameInfoObj->m_GameFlags & protocol7::GAMEFLAG_RACE)
-						str_time((int64_t)absolute(apPlayerInfo[t]->m_Score) / 10, ETimeFormat::MINS_CENTISECS, aScore[t], sizeof(aScore[t]));
-					else if(GameClient()->m_GameInfo.m_TimeScore)
-					{
-						CGameClient::CClientData &ClientData = GameClient()->m_aClients[apPlayerInfo[t]->m_ClientId];
-						if(GameClient()->m_ReceivedDDNetPlayerFinishTimes && ClientData.m_FinishTimeSeconds != FinishTime::NOT_FINISHED_MILLIS)
-						{
-							int64_t TimeSeconds = static_cast<int64_t>(absolute(ClientData.m_FinishTimeSeconds));
-							int64_t TimeMillis = TimeSeconds * 1000 + (absolute(ClientData.m_FinishTimeMillis) % 1000);
+		TextRender()->TextEx(&Cursor, pName);
+	};
 
-							str_time(TimeMillis / 10, ETimeFormat::HOURS, aScore[t], sizeof(aScore[t]));
-						}
-						else if(apPlayerInfo[t]->m_Score != FinishTime::NOT_FINISHED_TIMESCORE)
-						{
-							str_time((int64_t)absolute(apPlayerInfo[t]->m_Score) * 100, ETimeFormat::HOURS, aScore[t], sizeof(aScore[t]));
-						}
-						else
-							aScore[t][0] = 0;
-					}
-					else
-						str_format(aScore[t], sizeof(aScore[t]), "%d", apPlayerInfo[t]->m_Score);
+	if(GameClient()->IsTeamPlay() && GameClient()->m_Snap.m_pGameDataObj)
+	{
+		char aScoreTeam[2][16];
+		str_format(aScoreTeam[TEAM_RED], sizeof(aScoreTeam[TEAM_RED]), "%d", GameClient()->m_Snap.m_pGameDataObj->m_TeamscoreRed);
+		str_format(aScoreTeam[TEAM_BLUE], sizeof(aScoreTeam[TEAM_BLUE]), "%d", GameClient()->m_Snap.m_pGameDataObj->m_TeamscoreBlue);
+
+		const float aScoreTextWidth[2] = {
+			TextRender()->TextWidth(ScoreTextSize, aScoreTeam[TEAM_RED], -1, -1.0f),
+			TextRender()->TextWidth(ScoreTextSize, aScoreTeam[TEAM_BLUE], -1, -1.0f)};
+		const float ScoreWidthMax = maximum(maximum(aScoreTextWidth[0], aScoreTextWidth[1]), TextRender()->TextWidth(ScoreTextSize, "100", -1, -1.0f));
+		const float ImageSize = (GameClient()->m_Snap.m_pGameInfoObj->m_GameFlags & GAMEFLAG_FLAGS) ? 16.0f * Scale : Split;
+		const int aFlagCarrier[2] = {
+			GameClient()->m_Snap.m_pGameDataObj->m_FlagCarrierRed,
+			GameClient()->m_Snap.m_pGameDataObj->m_FlagCarrierBlue};
+
+		for(int t = 0; t < 2; ++t)
+		{
+			const float RowY = BaseY + t * RowStep;
+			const float BoxX = RightEdge - ScoreWidthMax - ImageSize - 2.0f * Split;
+			const float BoxW = ScoreWidthMax + ImageSize + 2.0f * Split;
+			DrawScoreBox(
+				BoxX,
+				RowY,
+				BoxW,
+				ScoreSingleBoxHeight,
+				t == TEAM_RED ? ColorRGBA(0.975f, 0.17f, 0.17f, 0.3f) : ColorRGBA(0.17f, 0.46f, 0.975f, 0.3f));
+
+			TextRender()->Text(
+				RightEdge - ScoreWidthMax + (ScoreWidthMax - aScoreTextWidth[t]) / 2.0f - Split,
+				RowY + (ScoreSingleBoxHeight - ScoreTextSize) / 2.0f,
+				ScoreTextSize,
+				aScoreTeam[t],
+				-1.0f);
+
+			if(GameClient()->m_Snap.m_pGameInfoObj->m_GameFlags & GAMEFLAG_FLAGS)
+			{
+				const int BlinkTimer = (GameClient()->m_aFlagDropTick[t] != 0 &&
+							       (Client()->GameTick(g_Config.m_ClDummy) - GameClient()->m_aFlagDropTick[t]) / Client()->GameTickSpeed() >= 25) ?
+							       10 :
+							       20;
+				if(aFlagCarrier[t] == FLAG_ATSTAND || (aFlagCarrier[t] == FLAG_TAKEN && ((Client()->GameTick(g_Config.m_ClDummy) / BlinkTimer) & 1)))
+				{
+					Graphics()->TextureSet(t == TEAM_RED ? GameClient()->m_GameSkin.m_SpriteFlagRed : GameClient()->m_GameSkin.m_SpriteFlagBlue);
+					Graphics()->SetColor(1.f, 1.f, 1.f, 1.f);
+					Graphics()->RenderQuadContainerAsSprite(m_HudQuadContainerIndex, m_FlagOffset, RightEdge - ScoreWidthMax - ImageSize, RowY + 1.0f * Scale);
+				}
+				else if(aFlagCarrier[t] >= 0)
+				{
+					const int Id = aFlagCarrier[t] % MAX_CLIENTS;
+					char aSanitizedName[MAX_NAME_LENGTH];
+					GameClient()->m_BestClient.SanitizePlayerName(GameClient()->m_aClients[Id].m_aName, aSanitizedName, sizeof(aSanitizedName), Id, true);
+					const char *pName = aSanitizedName;
+					const float NameWidth = TextRender()->TextWidth(NameTextSize, pName, -1, -1.0f);
+					RenderPlayerName(
+						Id,
+						minimum(RightEdge - NameWidth - 1.0f * Scale, BoxX),
+						RowY + 20.0f * Scale - 2.0f * Scale,
+						NameTextSize,
+						pName);
+
+					CTeeRenderInfo TeeInfo = GameClient()->m_aClients[Id].m_RenderInfo;
+					TeeInfo.m_Size = ScoreSingleBoxHeight;
+					const CAnimState *pIdleState = CAnimState::GetIdle();
+					vec2 OffsetToMid;
+					CRenderTools::GetRenderTeeOffsetToRenderedTee(pIdleState, &TeeInfo, OffsetToMid);
+					const vec2 TeeRenderPos(RightEdge - ScoreWidthMax - TeeInfo.m_Size / 2.0f - Split, RowY + ScoreSingleBoxHeight / 2.0f + OffsetToMid.y);
+					RenderTools()->RenderTee(pIdleState, &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), TeeRenderPos);
+				}
+			}
+		}
+		return;
+	}
+
+	int Local = -1;
+	int aPos[2] = {1, 2};
+	const CNetObj_PlayerInfo *apPlayerInfo[2] = {nullptr, nullptr};
+	int i = 0;
+	for(int t = 0; t < 2 && i < MAX_CLIENTS && GameClient()->m_Snap.m_apInfoByScore[i]; ++i)
+	{
+		if(GameClient()->m_Snap.m_apInfoByScore[i]->m_Team != TEAM_SPECTATORS)
+		{
+			apPlayerInfo[t] = GameClient()->m_Snap.m_apInfoByScore[i];
+			if(apPlayerInfo[t]->m_ClientId == GameClient()->m_Snap.m_LocalClientId)
+				Local = t;
+			++t;
+		}
+	}
+	if(Local == -1 && GameClient()->m_Snap.m_pLocalInfo && GameClient()->m_Snap.m_pLocalInfo->m_Team != TEAM_SPECTATORS)
+	{
+		for(; i < MAX_CLIENTS && GameClient()->m_Snap.m_apInfoByScore[i]; ++i)
+		{
+			if(GameClient()->m_Snap.m_apInfoByScore[i]->m_Team != TEAM_SPECTATORS)
+				++aPos[1];
+			if(GameClient()->m_Snap.m_apInfoByScore[i]->m_ClientId == GameClient()->m_Snap.m_LocalClientId)
+			{
+				apPlayerInfo[1] = GameClient()->m_Snap.m_apInfoByScore[i];
+				Local = 1;
+				break;
+			}
+		}
+	}
+
+	char aScore[2][16];
+	for(int t = 0; t < 2; ++t)
+	{
+		if(apPlayerInfo[t])
+		{
+			if(Client()->IsSixup() && GameClient()->m_Snap.m_pGameInfoObj->m_GameFlags & protocol7::GAMEFLAG_RACE)
+				str_time((int64_t)absolute(apPlayerInfo[t]->m_Score) / 10, ETimeFormat::MINS_CENTISECS, aScore[t], sizeof(aScore[t]));
+			else if(GameClient()->m_GameInfo.m_TimeScore)
+			{
+				CGameClient::CClientData &ClientData = GameClient()->m_aClients[apPlayerInfo[t]->m_ClientId];
+				if(GameClient()->m_ReceivedDDNetPlayerFinishTimes && ClientData.m_FinishTimeSeconds != FinishTime::NOT_FINISHED_MILLIS)
+				{
+					const int64_t TimeSeconds = static_cast<int64_t>(absolute(ClientData.m_FinishTimeSeconds));
+					const int64_t TimeMillis = TimeSeconds * 1000 + (absolute(ClientData.m_FinishTimeMillis) % 1000);
+					str_time(TimeMillis / 10, ETimeFormat::HOURS, aScore[t], sizeof(aScore[t]));
+				}
+				else if(apPlayerInfo[t]->m_Score != FinishTime::NOT_FINISHED_TIMESCORE)
+				{
+					str_time((int64_t)absolute(apPlayerInfo[t]->m_Score) * 100, ETimeFormat::HOURS, aScore[t], sizeof(aScore[t]));
 				}
 				else
 					aScore[t][0] = 0;
 			}
+			else
+				str_format(aScore[t], sizeof(aScore[t]), "%d", apPlayerInfo[t]->m_Score);
+		}
+		else
+			aScore[t][0] = 0;
+	}
 
-			bool RecreateScores = str_comp(aScore[0], m_aScoreInfo[0].m_aScoreText) != 0 || str_comp(aScore[1], m_aScoreInfo[1].m_aScoreText) != 0 || m_LastLocalClientId != GameClient()->m_Snap.m_LocalClientId;
-			m_LastLocalClientId = GameClient()->m_Snap.m_LocalClientId;
+	const float aScoreTextWidth[2] = {
+		TextRender()->TextWidth(ScoreTextSize, aScore[0], -1, -1.0f),
+		TextRender()->TextWidth(ScoreTextSize, aScore[1], -1, -1.0f)};
+	const float ScoreWidthMax = maximum(maximum(aScoreTextWidth[0], aScoreTextWidth[1]), TextRender()->TextWidth(ScoreTextSize, "10", -1, -1.0f));
+	const float ImageSize = 16.0f * Scale;
+	const float PosSize = 16.0f * Scale;
 
-			bool RecreateRect = ForceScoreInfoInit;
-			for(int t = 0; t < 2; t++)
+	for(int t = 0; t < 2; ++t)
+	{
+		const float RowY = BaseY + t * RowStep;
+		const float BoxX = RightEdge - ScoreWidthMax - ImageSize - 2.0f * Split - PosSize;
+		const float BoxW = ScoreWidthMax + ImageSize + 2.0f * Split + PosSize;
+		DrawScoreBox(
+			BoxX,
+			RowY,
+			BoxW,
+			ScoreSingleBoxHeight,
+			t == Local ? ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f));
+
+		TextRender()->Text(
+			RightEdge - ScoreWidthMax + (ScoreWidthMax - aScoreTextWidth[t]) - Split,
+			RowY + (ScoreSingleBoxHeight - ScoreTextSize) / 2.0f,
+			ScoreTextSize,
+			aScore[t],
+			-1.0f);
+
+		if(apPlayerInfo[t])
+		{
+			const int Id = apPlayerInfo[t]->m_ClientId;
+			if(Id >= 0 && Id < MAX_CLIENTS)
 			{
-				if(RecreateScores)
-				{
-					m_aScoreInfo[t].m_ScoreTextWidth = TextRender()->TextWidth(14.0f, aScore[t], -1, -1.0f);
-					str_copy(m_aScoreInfo[t].m_aScoreText, aScore[t]);
-					RecreateRect = true;
-				}
+				char aSanitizedName[MAX_NAME_LENGTH];
+				GameClient()->m_BestClient.SanitizePlayerName(GameClient()->m_aClients[Id].m_aName, aSanitizedName, sizeof(aSanitizedName), Id, true);
+				const char *pName = aSanitizedName;
+				const float NameWidth = TextRender()->TextWidth(NameTextSize, pName, -1, -1.0f);
+				RenderPlayerName(
+					Id,
+					minimum(RightEdge - NameWidth - 1.0f * Scale, BoxX),
+					RowY + 20.0f * Scale - 2.0f * Scale,
+					NameTextSize,
+					pName);
 
-				if(apPlayerInfo[t])
-				{
-					int Id = apPlayerInfo[t]->m_ClientId;
-					if(Id >= 0 && Id < MAX_CLIENTS)
-					{
-						const char *pName = GameClient()->m_aClients[Id].m_aName;
-						if(str_comp(pName, m_aScoreInfo[t].m_aPlayerNameText) != 0)
-							RecreateRect = true;
-					}
-				}
-				else
-				{
-					if(m_aScoreInfo[t].m_aPlayerNameText[0] != 0)
-						RecreateRect = true;
-				}
-
-				char aBuf[16];
-				str_format(aBuf, sizeof(aBuf), "%d.", aPos[t]);
-				if(str_comp(aBuf, m_aScoreInfo[t].m_aRankText) != 0)
-					RecreateRect = true;
-			}
-
-			static float s_TextWidth10 = TextRender()->TextWidth(14.0f, "10", -1, -1.0f);
-			float ScoreWidthMax = maximum(maximum(m_aScoreInfo[0].m_ScoreTextWidth, m_aScoreInfo[1].m_ScoreTextWidth), s_TextWidth10);
-			float Split = 3.0f, ImageSize = 16.0f, PosSize = 16.0f;
-
-			for(int t = 0; t < 2; t++)
-			{
-				// draw box
-				if(RecreateRect)
-				{
-					Graphics()->DeleteQuadContainer(m_aScoreInfo[t].m_RoundRectQuadContainerIndex);
-
-					if(t == Local)
-						Graphics()->SetColor(1.0f, 1.0f, 1.0f, 0.25f);
-					else
-						Graphics()->SetColor(0.0f, 0.0f, 0.0f, 0.25f);
-					m_aScoreInfo[t].m_RoundRectQuadContainerIndex = Graphics()->CreateRectQuadContainer(m_Width - ScoreWidthMax - ImageSize - 2 * Split - PosSize, StartY + t * 20, ScoreWidthMax + ImageSize + 2 * Split + PosSize, ScoreSingleBoxHeight, 5.0f, IGraphics::CORNER_L);
-				}
-				Graphics()->TextureClear();
-				Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
-				if(m_aScoreInfo[t].m_RoundRectQuadContainerIndex != -1)
-					Graphics()->RenderQuadContainer(m_aScoreInfo[t].m_RoundRectQuadContainerIndex, -1);
-
-				if(RecreateScores)
-				{
-					CTextCursor Cursor;
-					Cursor.SetPosition(vec2(m_Width - ScoreWidthMax + (ScoreWidthMax - m_aScoreInfo[t].m_ScoreTextWidth) - Split, StartY + t * 20 + (18.f - 14.f) / 2.f));
-					Cursor.m_FontSize = 14.0f;
-					TextRender()->RecreateTextContainer(m_aScoreInfo[t].m_TextScoreContainerIndex, &Cursor, aScore[t]);
-				}
-				// draw score
-				if(m_aScoreInfo[t].m_TextScoreContainerIndex.Valid())
-				{
-					ColorRGBA TColor(1.f, 1.f, 1.f, 1.f);
-					ColorRGBA TOutlineColor(0.f, 0.f, 0.f, 0.3f);
-					TextRender()->RenderTextContainer(m_aScoreInfo[t].m_TextScoreContainerIndex, TColor, TOutlineColor);
-				}
-
-				if(apPlayerInfo[t])
-				{
-					// draw name
-					int Id = apPlayerInfo[t]->m_ClientId;
-					if(Id >= 0 && Id < MAX_CLIENTS)
-					{
-						const char *pName = GameClient()->m_aClients[Id].m_aName;
-						if(RecreateRect)
-						{
-							str_copy(m_aScoreInfo[t].m_aPlayerNameText, pName);
-
-							CTextCursor Cursor;
-							Cursor.SetPosition(vec2(minimum(m_Width - TextRender()->TextWidth(8.0f, pName) - 1.0f, m_Width - ScoreWidthMax - ImageSize - 2 * Split - PosSize), StartY + (t + 1) * 20.0f - 2.0f));
-							Cursor.m_FontSize = 8.0f;
-							TextRender()->RecreateTextContainer(m_aScoreInfo[t].m_OptionalNameTextContainerIndex, &Cursor, pName);
-						}
-
-						if(m_aScoreInfo[t].m_OptionalNameTextContainerIndex.Valid())
-						{
-							ColorRGBA TColor(1.f, 1.f, 1.f, 1.f);
-							ColorRGBA TOutlineColor(0.f, 0.f, 0.f, 0.3f);
-							TextRender()->RenderTextContainer(m_aScoreInfo[t].m_OptionalNameTextContainerIndex, TColor, TOutlineColor);
-						}
-
-						// draw tee
-						CTeeRenderInfo TeeInfo = GameClient()->m_aClients[Id].m_RenderInfo;
-						TeeInfo.m_Size = ScoreSingleBoxHeight;
-
-						const CAnimState *pIdleState = CAnimState::GetIdle();
-						vec2 OffsetToMid;
-						CRenderTools::GetRenderTeeOffsetToRenderedTee(pIdleState, &TeeInfo, OffsetToMid);
-						vec2 TeeRenderPos(m_Width - ScoreWidthMax - TeeInfo.m_Size / 2 - Split, StartY + (t * 20) + ScoreSingleBoxHeight / 2.0f + OffsetToMid.y);
-
-						RenderTools()->RenderTee(pIdleState, &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), TeeRenderPos);
-					}
-				}
-				else
-				{
-					m_aScoreInfo[t].m_aPlayerNameText[0] = 0;
-				}
-
-				// draw position
-				char aBuf[16];
-				str_format(aBuf, sizeof(aBuf), "%d.", aPos[t]);
-				if(RecreateRect)
-				{
-					str_copy(m_aScoreInfo[t].m_aRankText, aBuf);
-
-					CTextCursor Cursor;
-					Cursor.SetPosition(vec2(m_Width - ScoreWidthMax - ImageSize - Split - PosSize, StartY + t * 20 + (18.f - 10.f) / 2.f));
-					Cursor.m_FontSize = 10.0f;
-					TextRender()->RecreateTextContainer(m_aScoreInfo[t].m_TextRankContainerIndex, &Cursor, aBuf);
-				}
-				if(m_aScoreInfo[t].m_TextRankContainerIndex.Valid())
-				{
-					ColorRGBA TColor(1.f, 1.f, 1.f, 1.f);
-					ColorRGBA TOutlineColor(0.f, 0.f, 0.f, 0.3f);
-					TextRender()->RenderTextContainer(m_aScoreInfo[t].m_TextRankContainerIndex, TColor, TOutlineColor);
-				}
-
-				StartY += 8.0f;
+				CTeeRenderInfo TeeInfo = GameClient()->m_aClients[Id].m_RenderInfo;
+				TeeInfo.m_Size = ScoreSingleBoxHeight;
+				const CAnimState *pIdleState = CAnimState::GetIdle();
+				vec2 OffsetToMid;
+				CRenderTools::GetRenderTeeOffsetToRenderedTee(pIdleState, &TeeInfo, OffsetToMid);
+				const vec2 TeeRenderPos(RightEdge - ScoreWidthMax - TeeInfo.m_Size / 2.0f - Split, RowY + ScoreSingleBoxHeight / 2.0f + OffsetToMid.y);
+				RenderTools()->RenderTee(pIdleState, &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), TeeRenderPos);
 			}
 		}
+
+		char aBuf[16];
+		str_format(aBuf, sizeof(aBuf), "%d.", aPos[t]);
+		TextRender()->Text(
+			RightEdge - ScoreWidthMax - ImageSize - Split - PosSize,
+			RowY + (ScoreSingleBoxHeight - RankTextSize) / 2.0f,
+			RankTextSize,
+			aBuf,
+			-1.0f);
 	}
 }
 
@@ -570,6 +1573,17 @@ void CHud::RenderTextInfo()
 		str_format(aBuf, sizeof(aBuf), "%d", Client()->GetPredictionTime());
 		TextRender()->Text(m_Width - 10 - TextRender()->TextWidth(12, aBuf, -1, -1.0f), Showfps ? 20 : 5, 12, aBuf, -1.0f);
 	}
+	if(GameClient()->m_FastPractice.Enabled())
+	{
+		constexpr const char *pLine1 = "practice mode";
+		constexpr const char *pLine2 = "(you can use practice commands /tc /invincible)";
+		const float Line1Size = 10.0f;
+		const float Line2Size = 8.0f;
+		const float Line1X = m_Width / 2.0f - TextRender()->TextWidth(Line1Size, pLine1, -1, -1.0f) / 2.0f;
+		const float Line2X = m_Width / 2.0f - TextRender()->TextWidth(Line2Size, pLine2, -1, -1.0f) / 2.0f;
+		TextRender()->Text(Line1X, 34.0f, Line1Size, pLine1, -1.0f);
+		TextRender()->Text(Line2X, 45.0f, Line2Size, pLine2, -1.0f);
+	}
 
 	if(g_Config.m_TcMiniDebug)
 	{
@@ -625,8 +1639,13 @@ void CHud::RenderTextInfo()
 	// render team in freeze text and last notify
 	if((g_Config.m_TcShowFrozenText > 0 || g_Config.m_TcShowFrozenHud > 0 || g_Config.m_TcNotifyWhenLast) && GameClient()->m_GameInfo.m_EntitiesDDRace)
 	{
+		const CMusicPlayer::SHudReservation MusicReservation = GameClient()->m_MusicPlayer.HudReservation();
+		const bool MusicPlayerComponentDisabled = GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_VISUALS_MUSIC_PLAYER);
+		const bool MusicPlayerHudActive = !MusicPlayerComponentDisabled && g_Config.m_BcMusicPlayer != 0 && MusicReservation.m_Visible && MusicReservation.m_Active;
+
 		int NumInTeam = 0;
 		int NumFrozen = 0;
+		int NumUnfreezing = 0;
 		int LocalTeamID = 0;
 		if(GameClient()->m_Snap.m_LocalClientId >= 0 && GameClient()->m_Snap.m_SpecInfo.m_SpectatorId >= 0)
 		{
@@ -644,14 +1663,18 @@ void CHud::RenderTextInfo()
 			{
 				NumInTeam++;
 				if(GameClient()->m_aClients[i].m_FreezeEnd > 0 || GameClient()->m_aClients[i].m_DeepFrozen)
+				{
 					NumFrozen++;
+					if(!GameClient()->m_aClients[i].m_RegularPredicted.m_IsInFreeze)
+						NumUnfreezing++;
+				}
 			}
 		}
 
 		// Notify when last
 		if(g_Config.m_TcNotifyWhenLast)
 		{
-			if(NumInTeam > 1 && NumInTeam - NumFrozen == 1)
+			if(NumInTeam > 1 && NumInTeam - NumFrozen == 1 && NumUnfreezing == 0)
 			{
 				TextRender()->TextColor(color_cast<ColorRGBA>(ColorHSLA(g_Config.m_TcNotifyWhenLastColor)));
 				float FontSize = g_Config.m_TcNotifyWhenLastSize;
@@ -669,102 +1692,27 @@ void CHud::RenderTextInfo()
 		else if(g_Config.m_TcShowFrozenText == 2)
 			str_format(aBuf, sizeof(aBuf), "%d / %d", NumFrozen, NumInTeam);
 		if(g_Config.m_TcShowFrozenText > 0)
-			TextRender()->Text(m_Width / 2.0f - TextRender()->TextWidth(10.0f, aBuf) / 2.0f, 12.0f, 10.0f, aBuf);
+		{
+			const float FrozenTextWidth = TextRender()->TextWidth(10.0f, aBuf);
+			const float FrozenTextX = m_Width / 2.0f - FrozenTextWidth / 2.0f;
+			float FrozenTextY = 12.0f;
+			if(MusicPlayerHudActive)
+			{
+				CUIRect FrozenTextRect;
+				FrozenTextRect.x = FrozenTextX;
+				FrozenTextRect.y = FrozenTextY;
+				FrozenTextRect.w = FrozenTextWidth;
+				FrozenTextRect.h = 10.0f;
+				FrozenTextY += GameClient()->m_MusicPlayer.GetHudPushDownOffsetForRect(FrozenTextRect, m_Height, 2.0f);
+			}
+			TextRender()->Text(FrozenTextX, FrozenTextY, 10.0f, aBuf);
+		}
 
 		// str_format(aBuf, sizeof(aBuf), "%d", GameClient()->m_aClients[GameClient()->m_Snap.m_LocalClientId].m_PrevPredicted.m_FreezeEnd);
 		// str_format(aBuf, sizeof(aBuf), "%d", g_Config.m_ClWhatsMyPing);
 		// TextRender()->Text(0, m_Width / 2 - TextRender()->TextWidth(0, 10, aBuf, -1, -1.0f) / 2, 20, 10, aBuf, -1.0f);
 
-		if(g_Config.m_TcShowFrozenHud > 0 && !GameClient()->m_Scoreboard.IsActive() && !(LocalTeamID == 0 && g_Config.m_TcFrozenHudTeamOnly))
-		{
-			CTeeRenderInfo FreezeInfo;
-			const CSkin *pSkin = GameClient()->m_Skins.Find("x_ninja");
-			FreezeInfo.m_OriginalRenderSkin = pSkin->m_OriginalSkin;
-			FreezeInfo.m_ColorableRenderSkin = pSkin->m_ColorableSkin;
-			FreezeInfo.m_BloodColor = pSkin->m_BloodColor;
-			FreezeInfo.m_SkinMetrics = pSkin->m_Metrics;
-			FreezeInfo.m_ColorBody = ColorRGBA(1.0f, 1.0f, 1.0f);
-			FreezeInfo.m_ColorFeet = ColorRGBA(1.0f, 1.0f, 1.0f);
-			FreezeInfo.m_CustomColoredSkin = false;
-
-			float ProgressiveOffset = 0.0f;
-			float TeeSize = g_Config.m_TcFrozenHudTeeSize;
-			int MaxTees = (int)(8.3f * (m_Width / m_Height) * 13.0f / TeeSize);
-			if(!g_Config.m_ClShowfps && !g_Config.m_ClShowpred)
-				MaxTees = (int)(9.5f * (m_Width / m_Height) * 13.0f / TeeSize);
-			int MaxRows = g_Config.m_TcFrozenMaxRows;
-			float StartPos = m_Width / 2.0f + 38.0f * (m_Width / m_Height) / 1.78f;
-
-			int TotalRows = std::min(MaxRows, (NumInTeam + MaxTees - 1) / MaxTees);
-			Graphics()->TextureClear();
-			Graphics()->QuadsBegin();
-			Graphics()->SetColor(0.0f, 0.0f, 0.0f, 0.4f);
-			Graphics()->DrawRectExt(StartPos - TeeSize / 2.0f, 0.0f, TeeSize * std::min(NumInTeam, MaxTees), TeeSize + 3.0f + (TotalRows - 1) * TeeSize, 5.0f, IGraphics::CORNER_B);
-			Graphics()->QuadsEnd();
-
-			bool Overflow = NumInTeam > MaxTees * MaxRows;
-
-			int NumDisplayed = 0;
-			int NumInRow = 0;
-			int CurrentRow = 0;
-
-			for(int OverflowIndex = 0; OverflowIndex < 1 + Overflow; OverflowIndex++)
-			{
-				for(int i = 0; i < MAX_CLIENTS && NumDisplayed < MaxTees * MaxRows; i++)
-				{
-					if(!GameClient()->m_Snap.m_apPlayerInfos[i])
-						continue;
-					if(GameClient()->m_Teams.Team(i) == LocalTeamID)
-					{
-						bool Frozen = false;
-						CTeeRenderInfo TeeInfo = GameClient()->m_aClients[i].m_RenderInfo;
-						if(GameClient()->m_aClients[i].m_FreezeEnd > 0 || GameClient()->m_aClients[i].m_DeepFrozen)
-						{
-							if(!g_Config.m_TcShowFrozenHudSkins)
-								TeeInfo = FreezeInfo;
-							Frozen = true;
-						}
-
-						if(Overflow && Frozen && OverflowIndex == 0)
-							continue;
-						if(Overflow && !Frozen && OverflowIndex == 1)
-							continue;
-
-						NumDisplayed++;
-						NumInRow++;
-						if(NumInRow > MaxTees)
-						{
-							NumInRow = 1;
-							ProgressiveOffset = 0.0f;
-							CurrentRow++;
-						}
-
-						TeeInfo.m_Size = TeeSize;
-						const CAnimState *pIdleState = CAnimState::GetIdle();
-						vec2 OffsetToMid;
-						CRenderTools::GetRenderTeeOffsetToRenderedTee(pIdleState, &TeeInfo, OffsetToMid);
-						vec2 TeeRenderPos(StartPos + ProgressiveOffset, TeeSize * (0.7f) + CurrentRow * TeeSize);
-						float Alpha = 1.0f;
-						CNetObj_Character CurChar = GameClient()->m_aClients[i].m_RenderCur;
-						if(g_Config.m_TcShowFrozenHudSkins && Frozen)
-						{
-							Alpha = 0.6f;
-							TeeInfo.m_ColorBody.r *= 0.4f;
-							TeeInfo.m_ColorBody.g *= 0.4f;
-							TeeInfo.m_ColorBody.b *= 0.4f;
-							TeeInfo.m_ColorFeet.r *= 0.4f;
-							TeeInfo.m_ColorFeet.g *= 0.4f;
-							TeeInfo.m_ColorFeet.b *= 0.4f;
-						}
-						if(Frozen)
-							RenderTools()->RenderTee(pIdleState, &TeeInfo, EMOTE_PAIN, vec2(1.0f, 0.0f), TeeRenderPos, Alpha);
-						else
-							RenderTools()->RenderTee(pIdleState, &TeeInfo, CurChar.m_Emote, vec2(1.0f, 0.0f), TeeRenderPos);
-						ProgressiveOffset += TeeSize;
-					}
-				}
-			}
-		}
+		RenderFrozenHud();
 	}
 }
 
@@ -804,6 +1752,12 @@ void CHud::RenderCursor()
 	if(Scale <= 0.0f)
 		return;
 
+	// In "game no HUD" mode the HUD itself uses window aspect, but cursor world mapping
+	// must still use gameplay aspect, otherwise the cursor drifts away from the real aim.
+	const bool UseGameNoHudAspect = (Client()->State() == IClient::STATE_ONLINE || Client()->State() == IClient::STATE_DEMOPLAYBACK) && g_Config.m_BcCustomAspectRatioApplyMode == 2;
+	if(UseGameNoHudAspect)
+		Graphics()->SetScreenAspectOverrideEnabled(true);
+
 	int CurWeapon = 0;
 	vec2 TargetPos;
 	float Alpha = 1.0f;
@@ -823,12 +1777,20 @@ void CHud::RenderCursor()
 	{
 		// Render spec cursor
 		if(!g_Config.m_ClSpecCursor || !GameClient()->m_CursorInfo.IsAvailable())
+		{
+			if(UseGameNoHudAspect)
+				Graphics()->SetScreenAspectOverrideEnabled(false);
 			return;
+		}
 
 		bool RenderSpecCursor = (GameClient()->m_Snap.m_SpecInfo.m_Active && GameClient()->m_Snap.m_SpecInfo.m_SpectatorId != SPEC_FREEVIEW) || Client()->State() == IClient::STATE_DEMOPLAYBACK;
 
 		if(!RenderSpecCursor)
+		{
+			if(UseGameNoHudAspect)
+				Graphics()->SetScreenAspectOverrideEnabled(false);
 			return;
+		}
 
 		// Calculate factor to keep cursor on screen
 		const vec2 HalfSize = vec2(Center.x - aPoints[0], Center.y - aPoints[1]);
@@ -847,6 +1809,9 @@ void CHud::RenderCursor()
 	Graphics()->SetColor(1.0f, 1.0f, 1.0f, Alpha);
 	Graphics()->TextureSet(GameClient()->m_GameSkin.m_aSpriteWeaponCursors[CurWeapon]);
 	Graphics()->RenderQuadContainerAsSprite(m_HudQuadContainerIndex, m_aCursorOffset[CurWeapon], TargetPos.x, TargetPos.y, Scale, Scale);
+
+	if(UseGameNoHudAspect)
+		Graphics()->SetScreenAspectOverrideEnabled(false);
 }
 
 void CHud::PrepareAmmoHealthAndArmorQuads()
@@ -1451,82 +2416,211 @@ void CHud::RenderNinjaBarPos(const float x, float y, const float Width, const fl
 	Graphics()->WrapNormal();
 }
 
-void CHud::RenderSpectatorCount()
+bool CHud::GetSpectatorCountState(SSpectatorCountState &State, bool ForcePreview)
 {
-	if(!g_Config.m_ClShowhudSpectatorCount)
-	{
-		return;
-	}
+	State = SSpectatorCountState{};
+	if(!g_Config.m_ClShowhudSpectatorCount && !ForcePreview)
+		return false;
+
+	int aSpectatorIds[MAX_CLIENTS];
+	bool aSpectatorAdded[MAX_CLIENTS] = {};
+	int NumSpectatorIds = 0;
+	bool HasExactSpectatorNames = false;
+	bool HasReliableFallbackSpectatorNames = false;
+	auto AddSpectator = [&](int ClientId) {
+		if(ClientId < 0 || ClientId >= MAX_CLIENTS || aSpectatorAdded[ClientId])
+			return;
+		aSpectatorAdded[ClientId] = true;
+		aSpectatorIds[NumSpectatorIds] = ClientId;
+		++NumSpectatorIds;
+	};
 
 	int Count = 0;
+	const int LocalId = GameClient()->m_aLocalIds[0];
+	const int DummyId = Client()->DummyConnected() ? GameClient()->m_aLocalIds[1] : -1;
 	if(Client()->IsSixup())
 	{
 		for(int i = 0; i < MAX_CLIENTS; i++)
 		{
-			if(i == GameClient()->m_aLocalIds[0] || (GameClient()->Client()->DummyConnected() && i == GameClient()->m_aLocalIds[1]))
+			if(i == LocalId || i == DummyId)
 				continue;
-
 			if(Client()->m_TranslationContext.m_aClients[i].m_PlayerFlags7 & protocol7::PLAYERFLAG_WATCHING)
-			{
-				Count++;
-			}
+				AddSpectator(i);
 		}
+		Count = NumSpectatorIds;
+		HasExactSpectatorNames = true;
 	}
 	else
 	{
 		const CNetObj_SpectatorCount *pSpectatorCount = GameClient()->m_Snap.m_pSpectatorCount;
 		if(!pSpectatorCount)
 		{
-			m_LastSpectatorCountTick = Client()->GameTick(g_Config.m_ClDummy);
-			return;
+			if(!ForcePreview)
+				m_LastSpectatorCountTick = Client()->GameTick(g_Config.m_ClDummy);
+			return false;
 		}
 		Count = pSpectatorCount->m_NumSpectators;
+
+		if(GameClient()->m_Snap.m_NumSpectatorWatchers > 0)
+		{
+			for(int i = 0; i < MAX_CLIENTS; i++)
+			{
+				if(GameClient()->m_Snap.m_aSpectatorWatchers[i])
+					AddSpectator(i);
+			}
+			HasExactSpectatorNames = true;
+		}
+		else
+		{
+			for(int i = 0; i < MAX_CLIENTS; i++)
+			{
+				if(i == LocalId || i == DummyId)
+					continue;
+
+				const CNetObj_PlayerInfo *pInfo = GameClient()->m_Snap.m_apPlayerInfos[i];
+				if(!pInfo || !GameClient()->m_aClients[i].m_Active)
+					continue;
+
+				const bool IsLikelySpectator = pInfo->m_Team == TEAM_SPECTATORS || GameClient()->m_aClients[i].m_Spec || GameClient()->m_aClients[i].m_Paused;
+				if(IsLikelySpectator)
+					AddSpectator(i);
+			}
+			HasReliableFallbackSpectatorNames = NumSpectatorIds == Count;
+		}
 	}
 
 	if(Count == 0)
 	{
-		m_LastSpectatorCountTick = Client()->GameTick(g_Config.m_ClDummy);
+		if(!ForcePreview)
+		{
+			m_LastSpectatorCountTick = Client()->GameTick(g_Config.m_ClDummy);
+			return false;
+		}
+
+		Count = 5;
+		str_copy(State.m_aaNameLines[0], "sqwinix");
+		str_copy(State.m_aaNameLines[1], "+4");
+		State.m_NumNameLines = 2;
+	}
+	else if(!ForcePreview && Client()->GameTick(g_Config.m_ClDummy) < m_LastSpectatorCountTick + Client()->GameTickSpeed())
+	{
+		return false;
+	}
+	else if((HasExactSpectatorNames || HasReliableFallbackSpectatorNames) && NumSpectatorIds > 0)
+	{
+		const int MaxVisibleNames = 5;
+		const int VisibleNames = minimum(NumSpectatorIds, MaxVisibleNames);
+
+		int ShownNames = 0;
+		for(int i = 0; i < NumSpectatorIds && ShownNames < VisibleNames; i++)
+		{
+			char aSanitizedName[MAX_NAME_LENGTH];
+			GameClient()->m_BestClient.SanitizePlayerName(GameClient()->m_aClients[aSpectatorIds[i]].m_aName, aSanitizedName, sizeof(aSanitizedName), aSpectatorIds[i], true);
+			const char *pName = aSanitizedName;
+			if(pName[0] == '\0')
+				continue;
+			str_copy(State.m_aaNameLines[State.m_NumNameLines], pName);
+			++State.m_NumNameLines;
+			++ShownNames;
+		}
+
+		const int Remaining = maximum(0, Count - ShownNames);
+		if(Remaining > 0 && State.m_NumNameLines < 6)
+		{
+			str_format(State.m_aaNameLines[State.m_NumNameLines], sizeof(State.m_aaNameLines[State.m_NumNameLines]), "+%d", Remaining);
+			++State.m_NumNameLines;
+		}
+	}
+
+	State.m_Count = Count;
+	str_format(State.m_aCountBuf, sizeof(State.m_aCountBuf), "%d", Count);
+	return true;
+}
+
+CUIRect CHud::GetSpectatorCountRect(bool ForcePreview)
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_SPECTATOR_COUNT))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	SSpectatorCountState State;
+	if(!GetSpectatorCountState(State, ForcePreview))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_SPECTATOR_COUNT, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float Fontsize = 6.0f * Scale;
+	const float LineHeight = Fontsize + 2.0f * Scale;
+	const float PaddingX = 2.0f * Scale;
+	const float PaddingY = 2.0f * Scale;
+	float MaxLineWidth = Fontsize + 3.0f * Scale + TextRender()->TextWidth(Fontsize, State.m_aCountBuf);
+	for(int i = 0; i < State.m_NumNameLines; i++)
+		MaxLineWidth = maximum(MaxLineWidth, TextRender()->TextWidth(Fontsize, State.m_aaNameLines[i]));
+
+	const float BoxHeight = PaddingY * 2.0f + LineHeight * (1 + State.m_NumNameLines);
+	const float BoxWidth = PaddingX * 2.0f + MaxLineWidth;
+
+	HudLayout::SModuleRect RawRect;
+	if(!HudLayout::HasRuntimeOverride(HudLayout::MODULE_SPECTATOR_COUNT))
+	{
+		float Y = 285.0f - BoxHeight - 4.0f;
+		const CUIRect MovementInfoRect = GetMovementInformationRect(false);
+		if(MovementInfoRect.h > 0.0f)
+			Y -= 4.0f + MovementInfoRect.h;
+		const CUIRect ScoreRect = GetScoreHudRect(false);
+		if(ScoreRect.h > 0.0f)
+			Y -= ScoreRect.h;
+		if(g_Config.m_ClShowhudDummyActions && !(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER) && Client()->DummyConnected())
+			Y -= 29.0f + 4.0f;
+		RawRect = {m_Width - BoxWidth, Y, BoxWidth, BoxHeight, 5.0f * Scale};
+	}
+	else
+	{
+		RawRect = {Layout.m_X, Layout.m_Y, BoxWidth, BoxHeight, 5.0f * Scale};
+	}
+
+	const auto Rect = HudLayout::ClampRectToScreen(RawRect, m_Width, m_Height);
+	return {Rect.m_X, Rect.m_Y, Rect.m_W, Rect.m_H};
+}
+
+void CHud::RenderSpectatorCount(bool ForcePreview)
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_SPECTATOR_COUNT))
 		return;
-	}
 
-	// 1 second delay
-	if(Client()->GameTick(g_Config.m_ClDummy) < m_LastSpectatorCountTick + Client()->GameTickSpeed())
+	SSpectatorCountState State;
+	if(!GetSpectatorCountState(State, ForcePreview))
 		return;
 
-	char aBuf[16];
-	str_format(aBuf, sizeof(aBuf), "%d", Count);
+	const CUIRect Rect = GetSpectatorCountRect(ForcePreview);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
+		return;
 
-	const float Fontsize = 6.0f;
-	const float BoxHeight = 14.f;
-	const float BoxWidth = 13.f + TextRender()->TextWidth(Fontsize, aBuf);
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_SPECTATOR_COUNT, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float Fontsize = 6.0f * Scale;
+	const float LineHeight = Fontsize + 2.0f * Scale;
+	const float PaddingX = 2.0f * Scale;
+	const float PaddingY = 2.0f * Scale;
+	const ColorRGBA BackgroundColor = ThemeHudColor(GameClient(), color_cast<ColorRGBA>(ColorHSLA(Layout.m_BackgroundColor, true)), ForcePreview, 1.0f);
+	const int Corners = HudLayout::BackgroundCorners(IGraphics::CORNER_ALL, Rect.x, Rect.y, Rect.w, Rect.h, m_Width, m_Height);
 
-	float StartX = m_Width - BoxWidth;
-	float StartY = 285.0f - BoxHeight - 4; // 4 units distance to the next display;
-	if(g_Config.m_ClShowhudPlayerPosition || g_Config.m_ClShowhudPlayerSpeed || g_Config.m_ClShowhudPlayerAngle)
-	{
-		StartY -= 4;
-	}
-	StartY -= GetMovementInformationBoxHeight();
+	if(Layout.m_BackgroundEnabled)
+		Graphics()->DrawRect(Rect.x, Rect.y, Rect.w, Rect.h, BackgroundColor, Corners, 5.0f * Scale);
 
-	if(g_Config.m_ClShowhudScore)
-	{
-		StartY -= 56;
-	}
-
-	if(g_Config.m_ClShowhudDummyActions && !(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER) && Client()->DummyConnected())
-	{
-		StartY = StartY - 29.0f - 4; // dummy actions height and padding
-	}
-
-	Graphics()->DrawRect(StartX, StartY, BoxWidth, BoxHeight, ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), IGraphics::CORNER_L, 5.0f);
-
-	float y = StartY + BoxHeight / 3;
-	float x = StartX + 2;
+	float y = Rect.y + PaddingY;
+	const float X = Rect.x + PaddingX;
 
 	TextRender()->SetFontPreset(EFontPreset::ICON_FONT);
-	TextRender()->Text(x, y, Fontsize, FontIcon::EYE, -1.0f);
+	TextRender()->Text(X, y, Fontsize, FontIcon::EYE, -1.0f);
 	TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
-	TextRender()->Text(x + Fontsize + 3.f, y, Fontsize, aBuf, -1.0f);
+	TextRender()->Text(X + Fontsize + 3.0f * Scale, y, Fontsize, State.m_aCountBuf, -1.0f);
+
+	y += LineHeight;
+	for(int i = 0; i < State.m_NumNameLines; i++)
+	{
+		TextRender()->Text(X, y, Fontsize, State.m_aaNameLines[i], -1.0f);
+		y += LineHeight;
+	}
 }
 
 void CHud::RenderDummyActions()
@@ -1538,21 +2632,31 @@ void CHud::RenderDummyActions()
 	// render small dummy actions hud
 	const float BoxHeight = 29.0f;
 	const float BoxWidth = 16.0f;
+	float MovementInfoHeight = 0.0f;
+	if(HudLayout::IsEnabled(HudLayout::MODULE_MOVEMENT_INFO))
+	{
+		SMovementInformationState MovementInfoState;
+		if(GetMovementInformationState(MovementInfoState, false))
+		{
+			const auto MovementLayout = HudLayout::Get(HudLayout::MODULE_MOVEMENT_INFO, m_Width, m_Height);
+			const float MovementScale = std::clamp(MovementLayout.m_Scale / 100.0f, 0.25f, 3.0f);
+			MovementInfoHeight = GetMovementInformationBoxHeight(MovementInfoState, MovementScale);
+		}
+	}
 
 	float StartX = m_Width - BoxWidth;
 	float StartY = 285.0f - BoxHeight - 4; // 4 units distance to the next display;
-	if(g_Config.m_ClShowhudPlayerPosition || g_Config.m_ClShowhudPlayerSpeed || g_Config.m_ClShowhudPlayerAngle)
+	if(MovementInfoHeight > 0.0f)
 	{
 		StartY -= 4;
 	}
-	StartY -= GetMovementInformationBoxHeight();
+	StartY -= MovementInfoHeight;
 
-	if(g_Config.m_ClShowhudScore)
-	{
-		StartY -= 56;
-	}
+	const CUIRect ScoreRect = GetScoreHudRect(false);
+	if(ScoreRect.h > 0.0f)
+		StartY -= ScoreRect.h;
 
-	Graphics()->DrawRect(StartX, StartY, BoxWidth, BoxHeight, ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), IGraphics::CORNER_L, 5.0f);
+	Graphics()->DrawRect(StartX, StartY, BoxWidth, BoxHeight, ThemeHudColor(GameClient(), ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), false, 1.0f), IGraphics::CORNER_L, 5.0f);
 
 	float y = StartY + 2;
 	float x = StartX + 2;
@@ -1591,16 +2695,134 @@ inline int CHud::GetDigitsIndex(int Value, int Max)
 	return DigitsIndex;
 }
 
-inline float CHud::GetMovementInformationBoxHeight()
+bool CHud::GetMovementInformationState(SMovementInformationState &State, bool ForcePreview) const
 {
-	if(GameClient()->m_Snap.m_SpecInfo.m_Active && (GameClient()->m_Snap.m_SpecInfo.m_SpectatorId == SPEC_FREEVIEW || GameClient()->m_aClients[GameClient()->m_Snap.m_SpecInfo.m_SpectatorId].m_SpecCharPresent))
-		return g_Config.m_ClShowhudPlayerPosition ? 3.0f * MOVEMENT_INFORMATION_LINE_HEIGHT + 2.0f : 0.0f;
-	float BoxHeight = 3.0f * MOVEMENT_INFORMATION_LINE_HEIGHT * (g_Config.m_ClShowhudPlayerPosition + g_Config.m_ClShowhudPlayerSpeed) + 2.0f * MOVEMENT_INFORMATION_LINE_HEIGHT * g_Config.m_ClShowhudPlayerAngle;
-	if(g_Config.m_ClShowhudPlayerPosition || g_Config.m_ClShowhudPlayerSpeed || g_Config.m_ClShowhudPlayerAngle)
+	State = SMovementInformationState{};
+	State.m_ClientId = GameClient()->m_Snap.m_SpecInfo.m_Active ? GameClient()->m_Snap.m_SpecInfo.m_SpectatorId : GameClient()->m_Snap.m_LocalClientId;
+	State.m_HasValidClientId = State.m_ClientId >= 0 && State.m_ClientId < MAX_CLIENTS;
+	State.m_PosOnly = State.m_ClientId == SPEC_FREEVIEW || (State.m_HasValidClientId && GameClient()->m_aClients[State.m_ClientId].m_SpecCharPresent);
+	State.m_ShowDummyCoordIndicator = g_Config.m_BcShowhudDummyCoordIndicator && (State.m_HasValidClientId || ForcePreview);
+	State.m_ShowPosition = g_Config.m_ClShowhudPlayerPosition != 0;
+	State.m_ShowSpeed = !State.m_PosOnly && g_Config.m_ClShowhudPlayerSpeed != 0;
+	State.m_ShowAngle = !State.m_PosOnly && g_Config.m_ClShowhudPlayerAngle != 0;
+
+	if(!State.m_HasValidClientId && State.m_ClientId != SPEC_FREEVIEW && !ForcePreview)
+		return false;
+
+	if(State.m_HasValidClientId)
+		State.m_Info = GetMovementInformation(State.m_ClientId, g_Config.m_ClDummy);
+	else if(ForcePreview)
 	{
-		BoxHeight += 2.0f;
+		State.m_Info.m_Pos = vec2(163.03f, 51.53f);
+		State.m_Info.m_Speed = vec2(0.0f, 0.0f);
+		State.m_Info.m_Angle = 17.69f;
 	}
+	else
+	{
+		State.m_Info.m_Pos = vec2(0.0f, 0.0f);
+		State.m_Info.m_Speed = vec2(0.0f, 0.0f);
+		State.m_Info.m_Angle = 0.0f;
+	}
+
+	if(Client()->DummyConnected())
+	{
+		int DummyClientId = -1;
+
+		if(GameClient()->m_Snap.m_SpecInfo.m_Active)
+		{
+			const int SpectId = GameClient()->m_Snap.m_SpecInfo.m_SpectatorId;
+
+			if(SpectId == GameClient()->m_aLocalIds[0])
+				DummyClientId = GameClient()->m_aLocalIds[1];
+			else if(SpectId == GameClient()->m_aLocalIds[1])
+				DummyClientId = GameClient()->m_aLocalIds[0];
+			else
+				DummyClientId = GameClient()->m_aLocalIds[1 - (g_Config.m_ClDummy ? 1 : 0)];
+		}
+		else
+		{
+			DummyClientId = GameClient()->m_aLocalIds[1 - (g_Config.m_ClDummy ? 1 : 0)];
+		}
+
+		if(DummyClientId >= 0 && DummyClientId < MAX_CLIENTS &&
+			GameClient()->m_aClients[DummyClientId].m_Active)
+		{
+			State.m_DummyInfo = GetMovementInformation(
+				DummyClientId,
+				DummyClientId == GameClient()->m_aLocalIds[1]);
+			State.m_HasDummyInfo = true;
+		}
+	}
+
+	State.m_ShowDummyPos = State.m_HasDummyInfo && State.m_ShowPosition && g_Config.m_TcShowhudDummyPosition;
+	State.m_ShowDummySpeed = State.m_HasDummyInfo && State.m_ShowSpeed && g_Config.m_TcShowhudDummySpeed;
+	State.m_ShowDummyAngle = State.m_HasDummyInfo && State.m_ShowAngle && g_Config.m_TcShowhudDummyAngle;
+
+	return State.m_ShowPosition || State.m_ShowSpeed || State.m_ShowAngle || State.m_ShowDummyCoordIndicator || ForcePreview;
+}
+
+float CHud::GetMovementInformationBoxHeight(const SMovementInformationState &State, float Scale) const
+{
+	const float LineHeight = MOVEMENT_INFORMATION_LINE_HEIGHT * Scale;
+	float BoxHeight = 0.0f;
+
+	if(State.m_ShowPosition)
+	{
+		BoxHeight += 3.0f * LineHeight;
+		if(State.m_ShowDummyPos)
+			BoxHeight += 2.0f * LineHeight;
+	}
+
+	if(State.m_ShowSpeed)
+	{
+		BoxHeight += 3.0f * LineHeight;
+		if(State.m_ShowDummySpeed)
+			BoxHeight += 2.0f * LineHeight;
+	}
+
+	if(State.m_ShowAngle)
+	{
+		BoxHeight += 2.0f * LineHeight;
+		if(State.m_ShowDummyAngle)
+			BoxHeight += 1.0f * LineHeight;
+	}
+
+	if(State.m_ShowDummyCoordIndicator)
+		BoxHeight += LineHeight;
+
+	if(State.m_ShowPosition || State.m_ShowSpeed || State.m_ShowAngle)
+		BoxHeight += 2.0f * Scale;
+
 	return BoxHeight;
+}
+
+CUIRect CHud::GetMovementInformationRect(bool ForcePreview) const
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_MOVEMENT_INFO))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	SMovementInformationState State;
+	if(!GetMovementInformationState(State, ForcePreview))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_MOVEMENT_INFO, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float BoxWidth = 62.0f * Scale;
+	const float BoxHeight = GetMovementInformationBoxHeight(State, Scale);
+	HudLayout::SModuleRect RawRect;
+	if(!HudLayout::HasRuntimeOverride(HudLayout::MODULE_MOVEMENT_INFO))
+	{
+		RawRect = {m_Width - BoxWidth, 285.0f - BoxHeight - 4.0f, BoxWidth, BoxHeight, 5.0f * Scale};
+		const CUIRect ScoreRect = GetScoreHudRect(false);
+		if(ScoreRect.h > 0.0f)
+			RawRect.m_Y -= ScoreRect.h;
+	}
+	else
+	{
+		RawRect = {Layout.m_X, Layout.m_Y, BoxWidth, BoxHeight, 5.0f * Scale};
+	}
+	const auto Rect = HudLayout::ClampRectToScreen(RawRect, m_Width, m_Height);
+	return {Rect.m_X, Rect.m_Y, Rect.m_W, Rect.m_H};
 }
 
 void CHud::UpdateMovementInformationTextContainer(STextContainerIndex &TextContainer, float FontSize, float Value, float &PrevValue)
@@ -1677,137 +2899,148 @@ CHud::CMovementInformation CHud::GetMovementInformation(int ClientId, int Conn) 
 	return Out;
 }
 
-void CHud::RenderMovementInformation()
+bool CHud::HasPlayerBelowOnSameX(int ClientId, const CMovementInformation &Info) const
 {
-	const int ClientId = GameClient()->m_Snap.m_SpecInfo.m_Active ? GameClient()->m_Snap.m_SpecInfo.m_SpectatorId : GameClient()->m_Snap.m_LocalClientId;
-	const bool PosOnly = ClientId == SPEC_FREEVIEW || (GameClient()->m_aClients[ClientId].m_SpecCharPresent);
-	// Draw the information depending on settings: Position, speed and target angle
-	// This display is only to present the available information from the last snapshot, not to interpolate or predict
-	if(!g_Config.m_ClShowhudPlayerPosition && (PosOnly || (!g_Config.m_ClShowhudPlayerSpeed && !g_Config.m_ClShowhudPlayerAngle)))
+	if(ClientId < 0 || ClientId >= MAX_CLIENTS)
+		return false;
+
+	for(int i = 0; i < MAX_CLIENTS; i++)
 	{
+		if(i == ClientId || !GameClient()->m_aClients[i].m_Active || !GameClient()->m_Snap.m_aCharacters[i].m_Active)
+			continue;
+
+		const CNetObj_PlayerInfo *pInfo = GameClient()->m_Snap.m_apPlayerInfos[i];
+		if(!pInfo || pInfo->m_Team == TEAM_SPECTATORS)
+			continue;
+
+		const CMovementInformation OtherInfo = GetMovementInformation(i, i == GameClient()->m_aLocalIds[1]);
+		if(std::fabs(Info.m_Pos.x - OtherInfo.m_Pos.x) < 0.01f && OtherInfo.m_Pos.y > Info.m_Pos.y)
+			return true;
+	}
+
+	return false;
+}
+
+void CHud::RenderMovementInformation(bool ForcePreview)
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_MOVEMENT_INFO))
 		return;
-	}
-	const float LineSpacer = 1.0f; // above and below each entry
-	const float Fontsize = 6.0f;
 
-	float BoxHeight = GetMovementInformationBoxHeight();
-	bool HasDummyInfo = false;
-	CMovementInformation DummyInfo{};
+	SMovementInformationState State;
+	if(!GetMovementInformationState(State, ForcePreview))
+		return;
 
-	if(Client()->DummyConnected())
-	{
-		int DummyClientId = -1;
+	const CUIRect Rect = GetMovementInformationRect(ForcePreview);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
+		return;
 
-		if(GameClient()->m_Snap.m_SpecInfo.m_Active)
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_MOVEMENT_INFO, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float LineSpacer = 1.0f * Scale;
+	const float Fontsize = 6.0f * Scale;
+	const float LineHeight = MOVEMENT_INFORMATION_LINE_HEIGHT * Scale;
+	const bool BackgroundEnabled = Layout.m_BackgroundEnabled;
+	const ColorRGBA BackgroundColor = ThemeHudColor(GameClient(), color_cast<ColorRGBA>(ColorHSLA(Layout.m_BackgroundColor, true)), ForcePreview, 1.0f);
+	const int Corners = HudLayout::BackgroundCorners(IGraphics::CORNER_ALL, Rect.x, Rect.y, Rect.w, Rect.h, m_Width, m_Height);
+
+	if(BackgroundEnabled)
+		Graphics()->DrawRect(Rect.x, Rect.y, Rect.w, Rect.h, BackgroundColor, Corners, 5.0f * Scale);
+
+	const bool HasPlayerBelow = State.m_ShowDummyCoordIndicator &&
+				    State.m_ClientId != SPEC_FREEVIEW &&
+				    State.m_HasValidClientId &&
+				    HasPlayerBelowOnSameX(State.m_ClientId, State.m_Info);
+
+	float y = Rect.y + LineSpacer * 2.0f;
+	const float LeftX = Rect.x + 2.0f * Scale;
+	const float RightX = Rect.x + Rect.w - 2.0f * Scale;
+	auto RenderPlayerBelowIndicator = [&]() {
+		if(!State.m_ShowDummyCoordIndicator)
+			return;
+
+		ColorRGBA IndicatorNormalColor = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_BcShowhudDummyCoordIndicatorColor));
+		ColorRGBA IndicatorSameHeightColor = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_BcShowhudDummyCoordIndicatorSameHeightColor));
+		ColorRGBA ThemeColor;
+		if(GameClient()->m_MusicPlayer.GetHudThemeColor(ThemeColor, ForcePreview))
 		{
-			const int SpectId = GameClient()->m_Snap.m_SpecInfo.m_SpectatorId;
-
-			if(SpectId == GameClient()->m_aLocalIds[0])
-			{
-				DummyClientId = GameClient()->m_aLocalIds[1];
-			}
-			else if(SpectId == GameClient()->m_aLocalIds[1])
-			{
-				DummyClientId = GameClient()->m_aLocalIds[0];
-			}
-			else
-			{
-				DummyClientId = GameClient()->m_aLocalIds[1 - (g_Config.m_ClDummy ? 1 : 0)];
-			}
+			const float NormalAlpha = IndicatorNormalColor.a;
+			const float SameHeightAlpha = IndicatorSameHeightColor.a;
+			IndicatorNormalColor = ThemeHudColor(GameClient(), IndicatorNormalColor, ForcePreview, 0.85f);
+			IndicatorSameHeightColor = ThemeHudColor(GameClient(), IndicatorSameHeightColor, ForcePreview, 0.45f);
+			IndicatorNormalColor.a = NormalAlpha;
+			IndicatorSameHeightColor.a = SameHeightAlpha;
 		}
-		else
-		{
-			DummyClientId = GameClient()->m_aLocalIds[1 - (g_Config.m_ClDummy ? 1 : 0)];
-		}
+		const ColorRGBA IndicatorColor = HasPlayerBelow ? IndicatorSameHeightColor : IndicatorNormalColor;
 
-		if(DummyClientId >= 0 && DummyClientId < MAX_CLIENTS &&
-			GameClient()->m_aClients[DummyClientId].m_Active)
-		{
-			DummyInfo = GetMovementInformation(
-				DummyClientId,
-				DummyClientId == GameClient()->m_aLocalIds[1]);
-			HasDummyInfo = true;
-		}
-	}
+		TextRender()->Text(LeftX, y, Fontsize, Localize("Player below"), -1.0f);
 
-	const bool ShowDummyPos = HasDummyInfo && g_Config.m_ClShowhudPlayerPosition && g_Config.m_TcShowhudDummyPosition;
-	const bool ShowDummySpeed = HasDummyInfo && !PosOnly && g_Config.m_ClShowhudPlayerSpeed && g_Config.m_TcShowhudDummySpeed;
-	const bool ShowDummyAngle = HasDummyInfo && !PosOnly && g_Config.m_ClShowhudPlayerAngle && g_Config.m_TcShowhudDummyAngle;
+		const float CircleX = RightX - 3.0f * Scale;
+		const float CircleY = y + 3.0f * Scale;
+		const float GlowAlpha = IndicatorColor.a * 0.35f;
 
-	if(ShowDummyPos)
-		BoxHeight += 2.0f * MOVEMENT_INFORMATION_LINE_HEIGHT;
-	if(ShowDummySpeed)
-		BoxHeight += 2.0f * MOVEMENT_INFORMATION_LINE_HEIGHT;
-	if(ShowDummyAngle)
-		BoxHeight += 1.0f * MOVEMENT_INFORMATION_LINE_HEIGHT;
+		Graphics()->TextureClear();
+		Graphics()->QuadsBegin();
+		Graphics()->SetColor(IndicatorColor.r, IndicatorColor.g, IndicatorColor.b, GlowAlpha);
+		Graphics()->DrawCircle(CircleX, CircleY, 3.0f * Scale, 16);
+		Graphics()->SetColor(IndicatorColor.r, IndicatorColor.g, IndicatorColor.b, IndicatorColor.a);
+		Graphics()->DrawCircle(CircleX, CircleY, 1.8f * Scale, 16);
+		Graphics()->QuadsEnd();
+		Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+	};
 
-	const float BoxWidth = 62.0f;
-
-	float StartX = m_Width - BoxWidth;
-	float StartY = 285.0f - BoxHeight - 4.0f; // 4 units distance to the next display;
-	if(g_Config.m_ClShowhudScore)
-	{
-		StartY -= 56.0f;
-	}
-
-	Graphics()->DrawRect(StartX, StartY, BoxWidth, BoxHeight, ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), IGraphics::CORNER_L, 5.0f);
-
-	const CMovementInformation Info = GetMovementInformation(ClientId, g_Config.m_ClDummy);
-
-	float y = StartY + LineSpacer * 2.0f;
-	const float LeftX = StartX + 2.0f;
-	const float RightX = m_Width - 2.0f;
-
-	if(g_Config.m_ClShowhudPlayerPosition)
+	if(State.m_ShowPosition)
 	{
 		TextRender()->Text(LeftX, y, Fontsize, Localize("Position:"), -1.0f);
-		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+		y += LineHeight;
 
 		TextRender()->Text(LeftX, y, Fontsize, "X:", -1.0f);
-		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[0], Fontsize, Info.m_Pos.x, m_aPlayerPrevPosition[0]);
+		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[0], Fontsize, State.m_Info.m_Pos.x, m_aPlayerPrevPosition[0]);
 
 		ColorRGBA TextColor = TextRender()->DefaultTextColor();
-		if(ShowDummyPos && fabsf(Info.m_Pos.x - DummyInfo.m_Pos.x) < 0.01f)
+		if(State.m_ShowDummyPos && fabsf(State.m_Info.m_Pos.x - State.m_DummyInfo.m_Pos.x) < 0.01f)
 			TextColor = ColorRGBA(0.2f, 1.0f, 0.2f, 1.0f);
 
 		RenderMovementInformationTextContainer(m_aPlayerPositionContainers[0], TextColor, RightX, y);
-		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+		y += LineHeight;
 
 		TextRender()->Text(LeftX, y, Fontsize, "Y:", -1.0f);
-		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[1], Fontsize, Info.m_Pos.y, m_aPlayerPrevPosition[1]);
+		UpdateMovementInformationTextContainer(m_aPlayerPositionContainers[1], Fontsize, State.m_Info.m_Pos.y, m_aPlayerPrevPosition[1]);
 		RenderMovementInformationTextContainer(m_aPlayerPositionContainers[1], TextRender()->DefaultTextColor(), RightX, y);
-		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+		y += LineHeight;
 
-		if(ShowDummyPos)
+		if(State.m_ShowDummyPos)
 		{
 			char aBuf[32];
 
 			TextRender()->Text(LeftX, y, Fontsize, "DX:", -1.0f);
-			str_format(aBuf, sizeof(aBuf), "%.2f", DummyInfo.m_Pos.x);
+			str_format(aBuf, sizeof(aBuf), "%.2f", State.m_DummyInfo.m_Pos.x);
 
 			ColorRGBA DummyTextColor = TextRender()->DefaultTextColor();
-			if(fabsf(Info.m_Pos.x - DummyInfo.m_Pos.x) < 0.01f)
+			if(fabsf(State.m_Info.m_Pos.x - State.m_DummyInfo.m_Pos.x) < 0.01f)
 				DummyTextColor = ColorRGBA(0.2f, 1.0f, 0.2f, 1.0f);
 
 			TextRender()->TextColor(DummyTextColor);
 			TextRender()->Text(RightX - TextRender()->TextWidth(Fontsize, aBuf), y, Fontsize, aBuf, -1.0f);
 			TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
-			y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+			y += LineHeight;
 
 			TextRender()->Text(LeftX, y, Fontsize, "DY:", -1.0f);
-			str_format(aBuf, sizeof(aBuf), "%.2f", DummyInfo.m_Pos.y);
+			str_format(aBuf, sizeof(aBuf), "%.2f", State.m_DummyInfo.m_Pos.y);
 			TextRender()->Text(RightX - TextRender()->TextWidth(Fontsize, aBuf), y, Fontsize, aBuf, -1.0f);
-			y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+			y += LineHeight;
 		}
 	}
 
-	if(PosOnly)
+	if(State.m_PosOnly)
+	{
+		RenderPlayerBelowIndicator();
 		return;
+	}
 
-	if(g_Config.m_ClShowhudPlayerSpeed)
+	if(State.m_ShowSpeed)
 	{
 		TextRender()->Text(LeftX, y, Fontsize, Localize("Speed:"), -1.0f);
-		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+		y += LineHeight;
 
 		const char aaCoordinates[][4] = {"X:", "Y:"};
 		for(int i = 0; i < 2; i++)
@@ -1818,47 +3051,49 @@ void CHud::RenderMovementInformation()
 			if(m_aLastPlayerSpeedChange[i] == ESpeedChange::DECREASE)
 				Color = ColorRGBA(1.0f, 0.5f, 0.5f, 1.0f);
 			TextRender()->Text(LeftX, y, Fontsize, aaCoordinates[i], -1.0f);
-			UpdateMovementInformationTextContainer(m_aPlayerSpeedTextContainers[i], Fontsize, i == 0 ? Info.m_Speed.x : Info.m_Speed.y, m_aPlayerPrevSpeed[i]);
+			UpdateMovementInformationTextContainer(m_aPlayerSpeedTextContainers[i], Fontsize, i == 0 ? State.m_Info.m_Speed.x : State.m_Info.m_Speed.y, m_aPlayerPrevSpeed[i]);
 			RenderMovementInformationTextContainer(m_aPlayerSpeedTextContainers[i], Color, RightX, y);
-			y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+			y += LineHeight;
 		}
 
-		if(ShowDummySpeed)
+		if(State.m_ShowDummySpeed)
 		{
 			char aBuf[32];
 
 			TextRender()->Text(LeftX, y, Fontsize, "DX:", -1.0f);
-			str_format(aBuf, sizeof(aBuf), "%.2f", DummyInfo.m_Speed.x);
+			str_format(aBuf, sizeof(aBuf), "%.2f", State.m_DummyInfo.m_Speed.x);
 			TextRender()->Text(RightX - TextRender()->TextWidth(Fontsize, aBuf), y, Fontsize, aBuf, -1.0f);
-			y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+			y += LineHeight;
 
 			TextRender()->Text(LeftX, y, Fontsize, "DY:", -1.0f);
-			str_format(aBuf, sizeof(aBuf), "%.2f", DummyInfo.m_Speed.y);
+			str_format(aBuf, sizeof(aBuf), "%.2f", State.m_DummyInfo.m_Speed.y);
 			TextRender()->Text(RightX - TextRender()->TextWidth(Fontsize, aBuf), y, Fontsize, aBuf, -1.0f);
-			y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+			y += LineHeight;
 		}
 
 		TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
 	}
 
-	if(g_Config.m_ClShowhudPlayerAngle)
+	if(State.m_ShowAngle)
 	{
 		TextRender()->Text(LeftX, y, Fontsize, Localize("Angle:"), -1.0f);
-		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+		y += LineHeight;
 
-		UpdateMovementInformationTextContainer(m_PlayerAngleTextContainerIndex, Fontsize, Info.m_Angle, m_PlayerPrevAngle);
+		UpdateMovementInformationTextContainer(m_PlayerAngleTextContainerIndex, Fontsize, State.m_Info.m_Angle, m_PlayerPrevAngle);
 		RenderMovementInformationTextContainer(m_PlayerAngleTextContainerIndex, TextRender()->DefaultTextColor(), RightX, y);
-		y += MOVEMENT_INFORMATION_LINE_HEIGHT;
+		y += LineHeight;
 
-		if(ShowDummyAngle)
+		if(State.m_ShowDummyAngle)
 		{
 			char aBuf[32];
 
 			TextRender()->Text(LeftX, y, Fontsize, "DA:", -1.0f);
-			str_format(aBuf, sizeof(aBuf), "%.2f", DummyInfo.m_Angle);
+			str_format(aBuf, sizeof(aBuf), "%.2f", State.m_DummyInfo.m_Angle);
 			TextRender()->Text(RightX - TextRender()->TextWidth(Fontsize, aBuf), y, Fontsize, aBuf, -1.0f);
 		}
 	}
+
+	RenderPlayerBelowIndicator();
 }
 
 void CHud::RenderSpectatorHud()
@@ -1869,7 +3104,7 @@ void CHud::RenderSpectatorHud()
 	// TClient
 	float AdjustedHeight = m_Height - (g_Config.m_TcStatusBar ? g_Config.m_TcStatusBarHeight : 0.0f);
 	// draw the box
-	Graphics()->DrawRect(m_Width - 180.0f, AdjustedHeight - 15.0f, 180.0f, 15.0f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), IGraphics::CORNER_TL, 5.0f);
+	Graphics()->DrawRect(m_Width - 180.0f, AdjustedHeight - 15.0f, 180.0f, 15.0f, ThemeHudColor(GameClient(), ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), false, 1.0f), IGraphics::CORNER_TL, 5.0f);
 
 	// draw the text
 	char aBuf[128];
@@ -1880,10 +3115,12 @@ void CHud::RenderSpectatorHud()
 	else if(GameClient()->m_Snap.m_SpecInfo.m_SpectatorId != SPEC_FREEVIEW)
 	{
 		const auto &Player = GameClient()->m_aClients[GameClient()->m_Snap.m_SpecInfo.m_SpectatorId];
+		char aSanitizedName[MAX_NAME_LENGTH];
+		GameClient()->m_BestClient.SanitizePlayerName(Player.m_aName, aSanitizedName, sizeof(aSanitizedName), Player.ClientId(), true);
 		if(g_Config.m_ClShowIds)
-			str_format(aBuf, sizeof(aBuf), Localize("Following %d: %s", "Spectating"), Player.ClientId(), Player.m_aName);
+			str_format(aBuf, sizeof(aBuf), Localize("Following %d: %s", "Spectating"), Player.ClientId(), aSanitizedName);
 		else
-			str_format(aBuf, sizeof(aBuf), Localize("Following %s", "Spectating"), Player.m_aName);
+			str_format(aBuf, sizeof(aBuf), Localize("Following %s", "Spectating"), aSanitizedName);
 	}
 	else
 	{
@@ -1913,176 +3150,846 @@ void CHud::RenderSpectatorHud()
 	}
 }
 
-void CHud::RenderLocalTime(float x)
+CUIRect CHud::GetFrozenHudRect(bool ForcePreview) const
 {
-	if(!g_Config.m_ClShowLocalTimeAlways && !GameClient()->m_Scoreboard.IsActive())
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_FROZEN_HUD))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const SFrozenHudState State = GetFrozenHudState(GameClient(), ForcePreview);
+	if(!State.m_ShowHud || State.m_NumInTeam <= 0)
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_FROZEN_HUD, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float TeeSize = g_Config.m_TcFrozenHudTeeSize * Scale;
+	const float RowSpacing = 3.0f * Scale;
+	int MaxTees = (int)(8.3f * (m_Width / m_Height) * 13.0f / maximum(TeeSize, 1.0f));
+	if(!g_Config.m_ClShowfps && !g_Config.m_ClShowpred)
+		MaxTees = (int)(9.5f * (m_Width / m_Height) * 13.0f / maximum(TeeSize, 1.0f));
+	MaxTees = maximum(MaxTees, 1);
+	const int MaxRows = maximum(g_Config.m_TcFrozenMaxRows, 1);
+	const int TotalRows = maximum(1, minimum(MaxRows, (State.m_NumInTeam + MaxTees - 1) / MaxTees));
+	const int ExpandDir = FrozenHudExpandDir();
+
+	CUIRect Rect;
+	Rect.w = TeeSize * minimum(State.m_NumInTeam, MaxTees);
+	Rect.h = TeeSize + RowSpacing + (TotalRows - 1) * TeeSize;
+	Rect.y = Layout.m_Y;
+	if(ExpandDir == FROZEN_HUD_EXPAND_LEFT)
+		Rect.x = Layout.m_X - Rect.w + TeeSize / 2.0f;
+	else if(ExpandDir == FROZEN_HUD_EXPAND_CENTER)
+		Rect.x = Layout.m_X - Rect.w / 2.0f;
+	else
+		Rect.x = Layout.m_X - TeeSize / 2.0f;
+
+	const bool MusicPlayerComponentDisabled = GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_VISUALS_MUSIC_PLAYER);
+	const CMusicPlayer::SHudReservation MusicReservation = GameClient()->m_MusicPlayer.HudReservation();
+	const bool MusicPlayerHudActive = !MusicPlayerComponentDisabled && g_Config.m_BcMusicPlayer != 0 && MusicReservation.m_Visible && MusicReservation.m_Active;
+	if(MusicPlayerHudActive)
+		Rect.x += maximum(0.0f, GameClient()->m_MusicPlayer.GetHudPushOffsetForRect(Rect, m_Width, 2.0f));
+
+	Rect.x = std::clamp(Rect.x, 0.0f, maximum(0.0f, m_Width - Rect.w));
+	Rect.y = std::clamp(Rect.y, 0.0f, maximum(0.0f, m_Height - Rect.h));
+	return Rect;
+}
+
+void CHud::RenderFrozenHud(bool ForcePreview)
+{
+	const SFrozenHudState State = GetFrozenHudState(GameClient(), ForcePreview);
+	if(!State.m_ShowHud || State.m_NumInTeam <= 0)
 		return;
 
+	const CUIRect Rect = GetFrozenHudRect(ForcePreview);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
+		return;
+
+	CTeeRenderInfo FreezeInfo;
+	const CSkin *pSkin = GameClient()->m_Skins.Find("x_ninja");
+	FreezeInfo.m_OriginalRenderSkin = pSkin->m_OriginalSkin;
+	FreezeInfo.m_ColorableRenderSkin = pSkin->m_ColorableSkin;
+	FreezeInfo.m_BloodColor = pSkin->m_BloodColor;
+	FreezeInfo.m_SkinMetrics = pSkin->m_Metrics;
+	FreezeInfo.m_ColorBody = ColorRGBA(1.0f, 1.0f, 1.0f);
+	FreezeInfo.m_ColorFeet = ColorRGBA(1.0f, 1.0f, 1.0f);
+	FreezeInfo.m_CustomColoredSkin = false;
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_FROZEN_HUD, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float TeeSize = g_Config.m_TcFrozenHudTeeSize * Scale;
+	const float RowStep = TeeSize + 3.0f * Scale;
+	int MaxTees = (int)(8.3f * (m_Width / m_Height) * 13.0f / maximum(TeeSize, 1.0f));
+	if(!g_Config.m_ClShowfps && !g_Config.m_ClShowpred)
+		MaxTees = (int)(9.5f * (m_Width / m_Height) * 13.0f / maximum(TeeSize, 1.0f));
+	MaxTees = maximum(MaxTees, 1);
+	const int MaxRows = maximum(g_Config.m_TcFrozenMaxRows, 1);
+	const bool Overflow = State.m_NumInTeam > MaxTees * MaxRows;
+	const int ExpandDir = FrozenHudExpandDir();
+	const int Corners = HudLayout::BackgroundCorners(IGraphics::CORNER_ALL, Rect.x, Rect.y, Rect.w, Rect.h, m_Width, m_Height);
+
+	Graphics()->TextureClear();
+	Graphics()->QuadsBegin();
+	const ColorRGBA FrozenHudBgColor = ThemeHudColor(GameClient(), ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), ForcePreview, 1.0f);
+	Graphics()->SetColor(FrozenHudBgColor.r, FrozenHudBgColor.g, FrozenHudBgColor.b, FrozenHudBgColor.a);
+	Graphics()->DrawRectExt(Rect.x, Rect.y, Rect.w, Rect.h, 5.0f * Scale, Corners);
+	Graphics()->QuadsEnd();
+
+	const CAnimState *pIdleState = CAnimState::GetIdle();
+	const int PreviewClientId = GameClient()->m_Snap.m_LocalClientId >= 0 ? GameClient()->m_Snap.m_LocalClientId : 0;
+	struct SFrozenHudRenderTee
+	{
+		bool m_Frozen = false;
+		CTeeRenderInfo m_TeeInfo;
+		int m_Emote = EMOTE_NORMAL;
+	};
+	std::vector<SFrozenHudRenderTee> vRenderTees;
+	vRenderTees.reserve(MaxTees * MaxRows);
+
+	for(int OverflowIndex = 0; OverflowIndex < 1 + Overflow; OverflowIndex++)
+	{
+		for(int i = 0; i < MAX_CLIENTS && (int)vRenderTees.size() < MaxTees * MaxRows; i++)
+		{
+			const bool PreviewTee = ForcePreview && !GameClient()->m_Snap.m_apPlayerInfos[i] && i < State.m_NumInTeam;
+			if(!PreviewTee && !GameClient()->m_Snap.m_apPlayerInfos[i])
+				continue;
+			if(!PreviewTee && GameClient()->m_Teams.Team(i) != State.m_LocalTeamId)
+				continue;
+
+			const bool Frozen = PreviewTee ? i < State.m_NumFrozen : (GameClient()->m_aClients[i].m_FreezeEnd > 0 || GameClient()->m_aClients[i].m_DeepFrozen);
+			CTeeRenderInfo TeeInfo = GameClient()->m_aClients[PreviewTee ? PreviewClientId : i].m_RenderInfo;
+			if(Frozen && !g_Config.m_TcShowFrozenHudSkins)
+				TeeInfo = FreezeInfo;
+
+			if(Overflow && Frozen && OverflowIndex == 0)
+				continue;
+			if(Overflow && !Frozen && OverflowIndex == 1)
+				continue;
+
+			SFrozenHudRenderTee RenderTee;
+			RenderTee.m_Frozen = Frozen;
+			RenderTee.m_TeeInfo = TeeInfo;
+			RenderTee.m_Emote = PreviewTee ? EMOTE_NORMAL : GameClient()->m_aClients[i].m_RenderCur.m_Emote;
+			vRenderTees.push_back(RenderTee);
+		}
+	}
+
+	for(int Index = 0; Index < (int)vRenderTees.size(); Index++)
+	{
+		SFrozenHudRenderTee &RenderTee = vRenderTees[Index];
+		CTeeRenderInfo &TeeInfo = RenderTee.m_TeeInfo;
+		TeeInfo.m_Size = TeeSize;
+
+		float Alpha = 1.0f;
+		if(g_Config.m_TcShowFrozenHudSkins && RenderTee.m_Frozen)
+		{
+			Alpha = 0.6f;
+			TeeInfo.m_ColorBody.r *= 0.4f;
+			TeeInfo.m_ColorBody.g *= 0.4f;
+			TeeInfo.m_ColorBody.b *= 0.4f;
+			TeeInfo.m_ColorFeet.r *= 0.4f;
+			TeeInfo.m_ColorFeet.g *= 0.4f;
+			TeeInfo.m_ColorFeet.b *= 0.4f;
+		}
+
+		const int CurrentRow = Index / MaxTees;
+		const int NumInRow = Index % MaxTees;
+		const int RowStartIndex = CurrentRow * MaxTees;
+		const int RowCount = minimum(MaxTees, (int)vRenderTees.size() - RowStartIndex);
+
+		float TeePosX;
+		if(ExpandDir == FROZEN_HUD_EXPAND_LEFT)
+			TeePosX = Rect.x + Rect.w - TeeSize * 0.5f - NumInRow * TeeSize;
+		else if(ExpandDir == FROZEN_HUD_EXPAND_CENTER)
+		{
+			const float RowStartPos = Rect.x + Rect.w * 0.5f - RowCount * TeeSize * 0.5f + TeeSize * 0.5f;
+			TeePosX = RowStartPos + NumInRow * TeeSize;
+		}
+		else
+			TeePosX = Rect.x + TeeSize * 0.5f + NumInRow * TeeSize;
+
+		const vec2 TeeRenderPos(TeePosX, Rect.y + TeeSize * 0.7f + CurrentRow * RowStep);
+		if(RenderTee.m_Frozen)
+			RenderTools()->RenderTee(pIdleState, &TeeInfo, EMOTE_PAIN, vec2(1.0f, 0.0f), TeeRenderPos, Alpha);
+		else
+			RenderTools()->RenderTee(pIdleState, &TeeInfo, RenderTee.m_Emote, vec2(1.0f, 0.0f), TeeRenderPos);
+	}
+}
+
+CUIRect CHud::GetLocalTimeRect(bool ForcePreview) const
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_LOCAL_TIME))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+	if(!ForcePreview && !g_Config.m_ClShowLocalTimeAlways && !GameClient()->m_Scoreboard.IsActive())
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_LOCAL_TIME, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
 	const bool Seconds = g_Config.m_TcShowLocalTimeSeconds; // TClient
 
 	char aTimeStr[16];
-	str_timestamp_format(aTimeStr, sizeof(aTimeStr), Seconds ? "%H:%M.%S" : "%H:%M");
-	const float Width = std::round(TextRender()->TextBoundingBox(5.0f, aTimeStr).m_W);
+	str_timestamp_format(aTimeStr, sizeof(aTimeStr), Seconds ? "%H:%M:%S" : "%H:%M");
+	const float FontSize = 5.0f * Scale;
+	const float Padding = 5.0f * Scale;
+	const float Width = std::round(TextRender()->TextBoundingBox(FontSize, aTimeStr).m_W);
+	const float RectWidth = Width + Padding * 2.0f;
+	const float RectHeight = 12.5f * Scale;
+	CUIRect Rect = {Layout.m_X - Width - Padding * 3.0f, Layout.m_Y, RectWidth, RectHeight};
+	const bool MusicPlayerComponentDisabled = GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_VISUALS_MUSIC_PLAYER);
+	const CMusicPlayer::SHudReservation MusicReservation = GameClient()->m_MusicPlayer.HudReservation();
+	const bool MusicPlayerHudActive = !MusicPlayerComponentDisabled && g_Config.m_BcMusicPlayer != 0 && MusicReservation.m_Visible && MusicReservation.m_Active;
+	if(MusicPlayerHudActive)
+	{
+		const float Offset = GameClient()->m_MusicPlayer.GetHudPushOffsetForRect(Rect, m_Width, 2.0f);
+		Rect.x += Offset;
+	}
 
-	Graphics()->DrawRect(x - (Width + 15.0f), 0.0f, Width + 10.0f, 12.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), IGraphics::CORNER_B, 3.75f);
-	TextRender()->Text(x - (Width + 10.0f), (12.5f - 5.f) / 2.f, 5.0f, aTimeStr, -1.0f);
-
-	// Graphics()->DrawRect(x - 30.0f, 0.0f, 25.0f, 12.5f, ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f), IGraphics::CORNER_B, 3.75f);
-	// TextRender()->Text(x - 25.0f, (12.5f - 5.f) / 2.f, 5.0f, aTimeStr, -1.0f);
+	Rect.x = std::clamp(Rect.x, 0.0f, maximum(0.0f, m_Width - Rect.w));
+	Rect.y = std::clamp(Rect.y, 0.0f, maximum(0.0f, m_Height - Rect.h));
+	return Rect;
 }
 
-void CHud::RenderAlignmentIndicator()
+void CHud::RenderLocalTime(bool ForcePreview)
 {
-	// Only show when playing (not spectating)
-	if(!GameClient()->m_Snap.m_pLocalCharacter || GameClient()->m_Snap.m_SpecInfo.m_Active)
+	CUIRect Rect = GetLocalTimeRect(ForcePreview);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
 		return;
 
-	int LocalClientId = GameClient()->m_Snap.m_LocalClientId;
-	if(LocalClientId < 0)
-		return;
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_LOCAL_TIME, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const bool BackgroundEnabled = Layout.m_BackgroundEnabled;
+	const ColorRGBA BackgroundColor = ThemeHudColor(GameClient(), color_cast<ColorRGBA>(ColorHSLA(Layout.m_BackgroundColor, true)), ForcePreview, 1.0f);
+	const bool Seconds = g_Config.m_TcShowLocalTimeSeconds; // TClient
 
-	// Get local player position with interpolation for smooth tracking
-	const CNetObj_Character *pLocalChar = GameClient()->m_Snap.m_pLocalCharacter;
-	const CNetObj_Character *pLocalPrevChar = GameClient()->m_Snap.m_pLocalPrevCharacter;
-	
-	vec2 LocalPos;
-	if(pLocalChar && pLocalPrevChar)
+	char aTimeStr[16];
+	str_timestamp_format(aTimeStr, sizeof(aTimeStr), Seconds ? "%H:%M:%S" : "%H:%M");
+	const float FontSize = 5.0f * Scale;
+	const float Padding = 5.0f * Scale;
+	const float RectX = Rect.x;
+	const float RectY = Rect.y;
+	const float RectWidth = Rect.w;
+	const float RectHeight = Rect.h;
+	const int Corners = HudLayout::BackgroundCorners(IGraphics::CORNER_ALL, RectX, RectY, RectWidth, RectHeight, m_Width, m_Height);
+
+	if(BackgroundEnabled)
+		Graphics()->DrawRect(RectX, RectY, RectWidth, RectHeight, BackgroundColor, Corners, 3.75f * Scale);
+
+	TextRender()->Text(RectX + Padding, RectY + (RectHeight - FontSize) * 0.5f, FontSize, aTimeStr, -1.0f);
+}
+
+CUIRect CHud::GetLocalTimeHudEditorRect() const
+{
+	return GetLocalTimeRect(true);
+}
+
+CUIRect CHud::GetFinishPredictionAnchorRect() const
+{
+	if(g_Config.m_BcFinishPredictionMode == 1)
+		return GetFinishPredictionBarRect(true);
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_FINISH_PREDICTION, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float TitleFontSize = 5.25f * Scale;
+	const float ProgressFontSize = 4.75f * Scale;
+	const float PaddingX = 6.0f * Scale;
+	const float PaddingY = 4.0f * Scale;
+	const float Gap = 1.5f * Scale;
+	bool ShowTime = g_Config.m_BcFinishPredictionShowTime != 0;
+	bool ShowPercentage = g_Config.m_BcFinishPredictionShowPercentage != 0;
+	if(!ShowTime && !ShowPercentage)
 	{
-		LocalPos = mix(
-			vec2(pLocalPrevChar->m_X, pLocalPrevChar->m_Y),
-			vec2(pLocalChar->m_X, pLocalChar->m_Y),
-			Client()->IntraGameTick(g_Config.m_ClDummy)
-		);
+		ShowTime = true;
+		ShowPercentage = true;
+	}
+
+	char aSampleTopLine[64];
+	char aProgress[32];
+	str_format(aSampleTopLine, sizeof(aSampleTopLine), "%s %s", Localize("Finish"), "00:00:00.00");
+	str_copy(aProgress, "100.0%", sizeof(aProgress));
+
+	const float TopWidth = ShowTime ? TextRender()->TextWidth(TitleFontSize, aSampleTopLine, -1, -1.0f) : 0.0f;
+	const float ProgressWidth = ShowPercentage ? TextRender()->TextWidth(ProgressFontSize, aProgress, -1, -1.0f) : 0.0f;
+	const float RectWidth = maximum(TopWidth, ProgressWidth) + PaddingX * 2.0f;
+	const float RectHeight = PaddingY * 2.0f + (ShowTime ? TitleFontSize : 0.0f) + (ShowTime && ShowPercentage ? Gap : 0.0f) + (ShowPercentage ? ProgressFontSize : 0.0f);
+	CUIRect Rect = {Layout.m_X, Layout.m_Y, RectWidth, RectHeight};
+	Rect.x = std::clamp(Rect.x, 0.0f, maximum(0.0f, m_Width - Rect.w));
+	Rect.y = std::clamp(Rect.y, 0.0f, maximum(0.0f, m_Height - Rect.h));
+	return Rect;
+}
+
+CUIRect CHud::GetFinishPredictionRect(bool ForcePreview) const
+{
+	if(g_Config.m_BcFinishPredictionMode == 1)
+		return GetFinishPredictionBarRect(ForcePreview);
+	return GetFinishPredictionClassicRect(ForcePreview);
+}
+
+CUIRect CHud::GetFinishPredictionClassicRect(bool ForcePreview) const
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_FINISH_PREDICTION))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	SFinishPredictionState State;
+	if(!GetFinishPredictionState(State, ForcePreview))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_FINISH_PREDICTION, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float TitleFontSize = 5.25f * Scale;
+	const float ProgressFontSize = 4.75f * Scale;
+	const float PaddingX = 6.0f * Scale;
+	const float PaddingY = 4.0f * Scale;
+	const float Gap = 1.5f * Scale;
+	const bool ShowTime = g_Config.m_BcFinishPredictionShowTime != 0;
+	const bool ShowPercentage = g_Config.m_BcFinishPredictionShowPercentage != 0 || !State.m_HasPredictedTime;
+	const bool ShowMillis = g_Config.m_BcFinishPredictionShowMillis != 0;
+	if(!ShowTime && !ShowPercentage)
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	char aSampleTopLine[64];
+	char aProgress[32];
+	str_format(aSampleTopLine, sizeof(aSampleTopLine), "%s %s", Localize("Finish"), ShowMillis ? "00:00:00.00" : "00:00:00");
+	str_copy(aProgress, "100.0%", sizeof(aProgress));
+
+	const float TopWidth = ShowTime ? TextRender()->TextWidth(TitleFontSize, aSampleTopLine, -1, -1.0f) : 0.0f;
+	const float ProgressWidth = ShowPercentage ? TextRender()->TextWidth(ProgressFontSize, aProgress, -1, -1.0f) : 0.0f;
+	const float RectWidth = maximum(TopWidth, ProgressWidth) + PaddingX * 2.0f;
+	const float RectHeight = PaddingY * 2.0f + (ShowTime ? TitleFontSize : 0.0f) + (ShowTime && ShowPercentage ? Gap : 0.0f) + (ShowPercentage ? ProgressFontSize : 0.0f);
+	CUIRect Rect = {Layout.m_X, Layout.m_Y, RectWidth, RectHeight};
+	Rect.x = std::clamp(Rect.x, 0.0f, maximum(0.0f, m_Width - Rect.w));
+	Rect.y = std::clamp(Rect.y, 0.0f, maximum(0.0f, m_Height - Rect.h));
+	return Rect;
+}
+
+CUIRect CHud::GetFinishPredictionBarRect(bool ForcePreview) const
+{
+	if(!HudLayout::IsEnabled(HudLayout::MODULE_FINISH_PREDICTION))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	SFinishPredictionState State;
+	if(!GetFinishPredictionState(State, ForcePreview))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_FINISH_PREDICTION, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	CUIRect Rect = {Layout.m_X, Layout.m_Y, FINISH_PREDICTION_BAR_WIDTH * Scale, FINISH_PREDICTION_BAR_HEIGHT * Scale};
+	Rect.x = std::clamp(Rect.x, 0.0f, maximum(0.0f, m_Width - Rect.w));
+	Rect.y = std::clamp(Rect.y, 0.0f, maximum(0.0f, m_Height - Rect.h));
+	return Rect;
+}
+
+CUIRect CHud::GetKeystrokesKeyboardRectInternal(bool ForcePreview, bool IgnoreModuleEnabled) const
+{
+	if(!IgnoreModuleEnabled && (!HudLayout::IsEnabled(HudLayout::MODULE_KEYSTROKES_KEYBOARD) || g_Config.m_BcKeystrokesKeyboard == 0))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_KEYSTROKES_KEYBOARD, m_Width, m_Height);
+	const auto &Preset = GetKeystrokesKeyboardPreset(g_Config.m_BcKeystrokesKeyboardPreset);
+	const float Scale = GetKeystrokesScale(Layout);
+	const float Width = Preset.m_OverlayWidth * Scale;
+	const float Height = Preset.m_OverlayHeight * Scale;
+
+	HudLayout::SModuleRect RawRect;
+	if(!HudLayout::HasRuntimeOverride(HudLayout::MODULE_KEYSTROKES_KEYBOARD))
+	{
+		const CUIRect FinishRect = GetFinishPredictionAnchorRect();
+		RawRect = {FinishRect.x, FinishRect.y + FinishRect.h + KEYSTROKES_DEFAULT_GAP, Width, Height, 0.0f};
 	}
 	else
 	{
-		LocalPos = GameClient()->m_LocalCharacterPos;
+		RawRect = {Layout.m_X, Layout.m_Y, Width, Height, 0.0f};
 	}
-	
-	const float AlignmentThreshold = 0.01f; // Maximum X difference for "aligned"
-	const char *pAlignedText = nullptr;
-	
-	// Check all other players
-	for(int i = 0; i < MAX_CLIENTS; i++)
+
+	const auto Rect = HudLayout::ClampRectToScreen(RawRect, m_Width, m_Height);
+	(void)ForcePreview;
+	return {Rect.m_X, Rect.m_Y, Rect.m_W, Rect.m_H};
+}
+
+CUIRect CHud::GetKeystrokesKeyboardRect(bool ForcePreview) const
+{
+	return GetKeystrokesKeyboardRectInternal(ForcePreview, false);
+}
+
+int CHud::GetKeystrokesTrackedClientId() const
+{
+	if(Client()->State() == IClient::STATE_DEMOPLAYBACK)
 	{
-		if(i == LocalClientId)
-			continue;
-			
-		const CNetObj_Character *pCharacter = &GameClient()->m_Snap.m_aCharacters[i].m_Cur;
-		const CNetObj_Character *pPrevCharacter = &GameClient()->m_Snap.m_aCharacters[i].m_Prev;
-		
-		if(!pCharacter || !pPrevCharacter)
-			continue;
-			
-		// Get other player position with interpolation
-		vec2 OtherPos = mix(
-			vec2(pPrevCharacter->m_X, pPrevCharacter->m_Y),
-			vec2(pCharacter->m_X, pCharacter->m_Y),
-			Client()->IntraGameTick(g_Config.m_ClDummy)
-		);
-		
-		// Check if other player is below us
-		if(OtherPos.y <= LocalPos.y)
-			continue;
-		
-		// Check X alignment with high precision
-		float XDiff = std::abs(LocalPos.x - OtherPos.x);
-		if(XDiff <= AlignmentThreshold)
+		if(!GameClient()->m_Snap.m_SpecInfo.m_Active &&
+			in_range(GameClient()->m_Snap.m_LocalClientId, 0, MAX_CLIENTS - 1) &&
+			GameClient()->m_Snap.m_aCharacters[GameClient()->m_Snap.m_LocalClientId].m_Active)
+			return GameClient()->m_Snap.m_LocalClientId;
+		if(GameClient()->m_DemoSpecId > SPEC_FREEVIEW && GameClient()->m_DemoSpecId < MAX_CLIENTS)
+			return GameClient()->m_DemoSpecId;
+	}
+
+	if(!GameClient()->m_Snap.m_SpecInfo.m_Active)
+		return -1;
+
+	const int SpectatorId = GameClient()->m_Snap.m_SpecInfo.m_SpectatorId;
+	if(SpectatorId <= SPEC_FREEVIEW || SpectatorId >= MAX_CLIENTS)
+		return -1;
+
+	return SpectatorId;
+}
+
+const CNetObj_PlayerInput *CHud::GetKeystrokesTrackedInput() const
+{
+	const int SpectatorId = GetKeystrokesTrackedClientId();
+	if(SpectatorId < 0)
+		return nullptr;
+
+	if(CCharacter *pCharacter = GameClient()->m_GameWorld.GetCharacterById(SpectatorId))
+		return pCharacter->LatestInput();
+
+	return nullptr;
+}
+
+void CHud::RenderKeystrokesKeyboardInternal(bool ForcePreview, bool IgnoreModuleEnabled)
+{
+	const CUIRect Rect = GetKeystrokesKeyboardRectInternal(ForcePreview, IgnoreModuleEnabled);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
+		return;
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_KEYSTROKES_KEYBOARD, m_Width, m_Height);
+	const auto &Preset = GetKeystrokesKeyboardPreset(g_Config.m_BcKeystrokesKeyboardPreset);
+	const float Scale = GetKeystrokesScale(Layout);
+	const int TrackedClientId = ForcePreview ? -1 : GetKeystrokesTrackedClientId();
+	const CNetObj_PlayerInput *pTrackedInput = ForcePreview ? nullptr : GetKeystrokesTrackedInput();
+	const CNetObj_Character *pTrackedCharacter = TrackedClientId >= 0 && GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Active ?
+							     &GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Cur :
+							     nullptr;
+	for(int i = 0; i < Preset.m_NumElements; ++i)
+	{
+		const auto &Element = Preset.m_pElements[i];
+		const bool Active = !ForcePreview && (pTrackedCharacter != nullptr ?
+								     (pTrackedInput != nullptr ?
+										     IsKeystrokesPressed(pTrackedInput, Element.m_KeyPrimary, Element.m_KeySecondary) :
+										     IsKeystrokesPressed(pTrackedCharacter, Element.m_KeyPrimary, Element.m_KeySecondary)) :
+								     IsKeystrokesPressed(Input(), Element.m_KeyPrimary, Element.m_KeySecondary));
+		int MapY = Element.m_MapY;
+		bool UsePressedAtlas = Active && Preset.m_PressedOffsetY > 0;
+		if(UsePressedAtlas)
 		{
-			// Check if it's dummy
-			int DummyId = GameClient()->m_aLocalIds[!g_Config.m_ClDummy];
-			bool IsDummy = (i == DummyId);
-			
-			pAlignedText = IsDummy ? "Дамми снизу" : "Тии снизу";
-			break;
+			const int Candidate = MapY + Element.m_MapH + INPUT_OVERLAY_TEXTURE_SPACE;
+			if(Candidate + Element.m_MapH <= Preset.m_AtlasHeight)
+				MapY = Candidate;
 		}
-	}
-	
-	// Render alignment text if found
-	if(pAlignedText)
-	{
-		const float FontSize = 10.0f;
-		const float Width = TextRender()->TextWidth(FontSize, pAlignedText, -1, -1.0f);
-		const float X = m_Width / 2.0f - Width / 2.0f;
-		const float Y = 50.0f; // A bit higher above tee
-		
-		// Text with black outline
-		TextRender()->TextOutlineColor(0.0f, 0.0f, 0.0f, 1.0f);
-		TextRender()->TextColor(1.0f, 1.0f, 1.0f, 1.0f);
-		TextRender()->Text(X, Y, FontSize, pAlignedText, -1.0f);
-		
-		// Reset outline
-		TextRender()->TextOutlineColor(0.0f, 0.0f, 0.0f, 0.0f);
+
+		DrawKeystrokesSprite(
+			Graphics(),
+			m_KeystrokesKeyboardTexture,
+			Preset.m_AtlasWidth,
+			Preset.m_AtlasHeight,
+			Element.m_MapX,
+			MapY,
+			Element.m_MapW,
+			Element.m_MapH,
+			Rect.x + Element.m_PosX * Scale,
+			Rect.y + Element.m_PosY * Scale,
+			Element.m_MapW * Scale,
+			Element.m_MapH * Scale,
+			ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f));
 	}
 }
 
-void CHud::RenderAutoAimCone()
+void CHud::RenderKeystrokesKeyboard(bool ForcePreview)
 {
-	// Only render when auto aim is enabled and player is playing (not spectating)
-	if(!g_Config.m_ClAutoAim)
-		return;
-		
-	// Don't render in spectator mode
-	if(!GameClient()->m_Snap.m_pLocalCharacter || GameClient()->m_Snap.m_SpecInfo.m_Active)
+	RenderKeystrokesKeyboardInternal(ForcePreview, false);
+}
+
+CUIRect CHud::GetKeystrokesMouseRectInternal(bool ForcePreview, bool IgnoreModuleEnabled) const
+{
+	if(!IgnoreModuleEnabled && (!HudLayout::IsEnabled(HudLayout::MODULE_KEYSTROKES_MOUSE) || g_Config.m_BcKeystrokesMouse == 0))
+		return {0.0f, 0.0f, 0.0f, 0.0f};
+
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_KEYSTROKES_MOUSE, m_Width, m_Height);
+	const auto &Preset = GetKeystrokesMousePreset(g_Config.m_BcKeystrokesMousePreset);
+	const float Scale = GetKeystrokesScale(Layout);
+	const float Width = Preset.m_OverlayWidth * Scale;
+	const float Height = Preset.m_OverlayHeight * Scale;
+
+	HudLayout::SModuleRect RawRect;
+	if(!HudLayout::HasRuntimeOverride(HudLayout::MODULE_KEYSTROKES_MOUSE))
+	{
+		const CUIRect KeyboardRect = GetKeystrokesKeyboardRectInternal(ForcePreview, true);
+		RawRect = {KeyboardRect.x + KeyboardRect.w + KEYSTROKES_DEFAULT_GAP, KeyboardRect.y, Width, Height, 0.0f};
+	}
+	else
+	{
+		RawRect = {Layout.m_X, Layout.m_Y, Width, Height, 0.0f};
+	}
+
+	const auto Rect = HudLayout::ClampRectToScreen(RawRect, m_Width, m_Height);
+	return {Rect.m_X, Rect.m_Y, Rect.m_W, Rect.m_H};
+}
+
+CUIRect CHud::GetKeystrokesMouseRect(bool ForcePreview) const
+{
+	return GetKeystrokesMouseRectInternal(ForcePreview, false);
+}
+
+void CHud::RenderKeystrokesMouseInternal(bool ForcePreview, bool IgnoreModuleEnabled)
+{
+	const CUIRect Rect = GetKeystrokesMouseRectInternal(ForcePreview, IgnoreModuleEnabled);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
 		return;
 
-	int LocalClientId = GameClient()->m_Snap.m_LocalClientId;
-	if(LocalClientId < 0)
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_KEYSTROKES_MOUSE, m_Width, m_Height);
+	const auto &Preset = GetKeystrokesMousePreset(g_Config.m_BcKeystrokesMousePreset);
+	const float Scale = GetKeystrokesScale(Layout);
+	const int64_t Now = time_get();
+	const int TrackedClientId = ForcePreview ? -1 : GetKeystrokesTrackedClientId();
+	const bool HasTrackedPlayer = TrackedClientId >= 0;
+	const CNetObj_PlayerInput *pTrackedInput = ForcePreview ? nullptr : GetKeystrokesTrackedInput();
+	const CNetObj_Character *pTrackedCharacter = HasTrackedPlayer && GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Active ?
+							     &GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Cur :
+							     nullptr;
+	const CNetObj_Character *pPrevTrackedCharacter = HasTrackedPlayer && GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Active ?
+								 &GameClient()->m_Snap.m_aCharacters[TrackedClientId].m_Prev :
+								 nullptr;
+	if(!ForcePreview)
+	{
+		if(!HasTrackedPlayer && pTrackedInput == nullptr && Input()->KeyPress(KEY_MOUSE_WHEEL_UP))
+			m_KeystrokesWheelUpEndTime = Now + time_freq() * KEYSTROKES_WHEEL_HIGHLIGHT_MS / 1000;
+		if(!HasTrackedPlayer && pTrackedInput == nullptr && Input()->KeyPress(KEY_MOUSE_WHEEL_DOWN))
+			m_KeystrokesWheelDownEndTime = Now + time_freq() * KEYSTROKES_WHEEL_HIGHLIGHT_MS / 1000;
+		if(HasTrackedPlayer && pTrackedInput == nullptr && pTrackedCharacter != nullptr && pPrevTrackedCharacter != nullptr &&
+			pPrevTrackedCharacter->m_AttackTick != pTrackedCharacter->m_AttackTick)
+		{
+			m_KeystrokesMouse1EndTime = Now + time_freq() * KEYSTROKES_WHEEL_HIGHLIGHT_MS / 1000;
+		}
+	}
+
+	vec2 AimOffset(0.0f, 0.0f);
+	float AimRotation = 0.0f;
+	bool MouseMoved = false;
+	if(!ForcePreview)
+	{
+		vec2 Aim(0.0f, 0.0f);
+		if(pTrackedInput != nullptr)
+			Aim = vec2((float)pTrackedInput->m_TargetX, (float)pTrackedInput->m_TargetY);
+		else if(HasTrackedPlayer)
+			GetKeystrokesTrackedAim(GameClient(), TrackedClientId, Client()->IntraGameTick(g_Config.m_ClDummy), Aim);
+		else
+			Aim = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
+		const float MaxDistance = maximum(GameClient()->m_Controls.GetMaxMouseDistance(), 0.001f);
+		float Length = length(Aim);
+		if(Length > 0.001f)
+		{
+			MouseMoved = true;
+			AimRotation = std::atan2(Aim.y, Aim.x) + pi / 2.0f;
+			Aim /= MaxDistance;
+			Length = length(Aim);
+			if(Length > 1.0f)
+				Aim /= Length;
+			AimOffset = Aim;
+		}
+	}
+
+	for(int i = 0; i < Preset.m_NumElements; ++i)
+	{
+		const auto &Element = Preset.m_pElements[i];
+		bool Active = false;
+		switch(Element.m_InputKind)
+		{
+		case EKeystrokesInputKind::NONE:
+			Active = true;
+			break;
+		case EKeystrokesInputKind::KEY:
+			Active = !ForcePreview && (HasTrackedPlayer ?
+								  (pTrackedInput != nullptr ?
+										  IsKeystrokesPressed(pTrackedInput, Element.m_KeyPrimary, Element.m_KeySecondary) :
+										  false) :
+								  IsKeystrokesPressed(Input(), Element.m_KeyPrimary, Element.m_KeySecondary));
+			break;
+		case EKeystrokesInputKind::MOUSE_BUTTON:
+			Active = !ForcePreview && (HasTrackedPlayer ?
+								  (pTrackedInput != nullptr ?
+										  IsKeystrokesMouseButtonPressed(pTrackedInput, Element.m_MouseButton) :
+										  IsKeystrokesMouseButtonPressedFromCharacter(pPrevTrackedCharacter, pTrackedCharacter, Element.m_MouseButton, Now, m_KeystrokesMouse1EndTime)) :
+								  IsKeystrokesMouseButtonPressed(Input(), Element.m_MouseButton));
+			break;
+		case EKeystrokesInputKind::WHEEL:
+			Active = !ForcePreview && IsKeystrokesWheelActive(Element.m_WheelDir, Now, m_KeystrokesWheelUpEndTime, m_KeystrokesWheelDownEndTime);
+			break;
+		case EKeystrokesInputKind::MOUSE_MOVE:
+			Active = !ForcePreview && MouseMoved;
+			break;
+		}
+
+		if(Element.m_ActiveOnly && !Active)
+			continue;
+
+		int MapY = Element.m_MapY;
+		if(Active && !Element.m_ActiveOnly &&
+			((Element.m_InputKind == EKeystrokesInputKind::KEY && Preset.m_PressedOffsetY > 0) || Element.m_InputKind == EKeystrokesInputKind::MOUSE_BUTTON))
+		{
+			const int Candidate = MapY + Element.m_MapH + INPUT_OVERLAY_TEXTURE_SPACE;
+			if(Candidate + Element.m_MapH <= Preset.m_AtlasHeight)
+				MapY = Candidate;
+		}
+
+		float Alpha = 1.0f;
+		if(Element.m_InputKind == EKeystrokesInputKind::NONE)
+			Alpha = 1.0f;
+		if(Element.m_InputKind == EKeystrokesInputKind::WHEEL)
+			Alpha = Active ? 1.0f : 0.0f;
+		if(Element.m_ActiveOnly)
+			Alpha = Active ? 1.0f : 0.0f;
+		if(Alpha <= 0.0f)
+			continue;
+
+		ColorRGBA DrawColor(1.0f, 1.0f, 1.0f, Alpha);
+
+		const float X = Rect.x + Element.m_PosX * Scale;
+		const float Y = Rect.y + Element.m_PosY * Scale;
+		vec2 Offset(0.0f, 0.0f);
+		float Rotation = 0.0f;
+		if(Element.m_InputKind == EKeystrokesInputKind::MOUSE_MOVE)
+		{
+			Offset = AimOffset * (Element.m_MouseRadius * Scale);
+			if(Element.m_MouseType == 1)
+				Rotation = AimRotation;
+		}
+
+		DrawKeystrokesSprite(
+			Graphics(),
+			m_KeystrokesMouseTexture,
+			Preset.m_AtlasWidth,
+			Preset.m_AtlasHeight,
+			Element.m_MapX,
+			MapY,
+			Element.m_MapW,
+			Element.m_MapH,
+			X + Offset.x,
+			Y + Offset.y,
+			Element.m_MapW * Scale,
+			Element.m_MapH * Scale,
+			DrawColor,
+			Rotation);
+	}
+}
+
+void CHud::RenderKeystrokesMouse(bool ForcePreview)
+{
+	RenderKeystrokesMouseInternal(ForcePreview, false);
+}
+
+void CHud::RenderFinishPrediction(bool ForcePreview)
+{
+	CUIRect Rect = GetFinishPredictionRect(ForcePreview);
+	if(Rect.w <= 0.0f || Rect.h <= 0.0f)
 		return;
 
-	// Get local player position
-	vec2 LocalPos = GameClient()->m_LocalCharacterPos;
-	
-	// Get aim direction from controls
-	vec2 AimDir = normalize(vec2(
-		GameClient()->m_Controls.m_aInputData[g_Config.m_ClDummy].m_TargetX,
-		GameClient()->m_Controls.m_aInputData[g_Config.m_ClDummy].m_TargetY
-	));
-	
-	// Calculate the two cone boundary lines at ±45 degrees (90 degree total cone)
-	const float MaxHookRange = 375.0f;
-	const float ConeHalfAngle = 45.0f * 3.14159f / 180.0f; // 45 degrees in radians
-	
-	// Apply camera zoom to hook range so lines scale with zoom
-	float ZoomedHookRange = MaxHookRange / GameClient()->m_Camera.m_Zoom;
-	
-	// Rotate aim direction by +45 and -45 degrees
-	float CosAngle = std::cos(ConeHalfAngle);
-	float SinAngle = std::sin(ConeHalfAngle);
-	
-	// Right boundary (+45 degrees)
-	vec2 RightDir = vec2(
-		AimDir.x * CosAngle - AimDir.y * SinAngle,
-		AimDir.x * SinAngle + AimDir.y * CosAngle
-	);
-	
-	// Left boundary (-45 degrees)
-	vec2 LeftDir = vec2(
-		AimDir.x * CosAngle + AimDir.y * SinAngle,
-		-AimDir.x * SinAngle + AimDir.y * CosAngle
-	);
-	
-	// Calculate end points for the lines with zoomed range
-	vec2 RightEnd = LocalPos + RightDir * ZoomedHookRange;
-	vec2 LeftEnd = LocalPos + LeftDir * ZoomedHookRange;
-	
-	// Render the two cone boundary lines
-	Graphics()->TextureClear();
-	Graphics()->LinesBegin();
-	
-	IGraphics::CLineItem aLines[2] = {
-		{LocalPos.x, LocalPos.y, RightEnd.x, RightEnd.y},
-		{LocalPos.x, LocalPos.y, LeftEnd.x, LeftEnd.y}
-	};
-	
-	// White lines with some transparency
-	Graphics()->SetColor(1.0f, 1.0f, 1.0f, 0.5f);
-	Graphics()->LinesDraw(aLines, 2);
-	Graphics()->LinesEnd();
+	SFinishPredictionState State;
+	if(!GetFinishPredictionState(State, ForcePreview))
+		return;
+
+	if(g_Config.m_BcFinishPredictionMode == 1)
+		RenderFinishPredictionBar(Rect, State, ForcePreview);
+	else
+		RenderFinishPredictionClassic(Rect, State);
+}
+
+void CHud::RenderFinishPredictionClassic(const CUIRect &Rect, const SFinishPredictionState &State)
+{
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_FINISH_PREDICTION, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const float TitleFontSize = 5.25f * Scale;
+	const float ProgressFontSize = 4.75f * Scale;
+	const float PaddingX = 6.0f * Scale;
+	const float PaddingY = 4.0f * Scale;
+	const float Gap = 1.5f * Scale;
+	const ColorRGBA BackgroundColor = ThemeHudColor(GameClient(), color_cast<ColorRGBA>(ColorHSLA(Layout.m_BackgroundColor, true)), false, 1.0f);
+	const int Corners = HudLayout::BackgroundCorners(IGraphics::CORNER_ALL, Rect.x, Rect.y, Rect.w, Rect.h, m_Width, m_Height);
+	const bool ShowTime = g_Config.m_BcFinishPredictionShowTime != 0;
+	const bool ShowRemaining = g_Config.m_BcFinishPredictionTimeMode == 0;
+	const bool ShowPercentage = g_Config.m_BcFinishPredictionShowPercentage != 0 || !State.m_HasPredictedTime;
+	const bool ShowMillis = g_Config.m_BcFinishPredictionShowMillis != 0;
+
+	if(Layout.m_BackgroundEnabled)
+		Graphics()->DrawRect(Rect.x, Rect.y, Rect.w, Rect.h, BackgroundColor, Corners, 5.0f * Scale);
+
+	char aTime[32];
+	char aLabel[32];
+	char aProgress[32];
+	FormatPredictionTime(ShowRemaining ? State.m_RemainingTimeMs : State.m_PredictedFinishTimeMs, ShowMillis, aTime, sizeof(aTime));
+	str_copy(aLabel, ShowRemaining ? Localize("Left") : Localize("Finish"), sizeof(aLabel));
+	str_format(aProgress, sizeof(aProgress), "%.1f%%", State.m_Progress * 100.0f);
+
+	float TextY = Rect.y + PaddingY;
+	if(ShowTime)
+	{
+		char aTopLine[64];
+		str_format(aTopLine, sizeof(aTopLine), "%s %s", aLabel, aTime);
+		const float TopWidth = TextRender()->TextWidth(TitleFontSize, aTopLine, -1, -1.0f);
+		TextRender()->Text(Rect.x + maximum(PaddingX, (Rect.w - TopWidth) * 0.5f), TextY, TitleFontSize, aTopLine, -1.0f);
+		TextY += TitleFontSize + Gap;
+	}
+	if(ShowPercentage)
+	{
+		const float ProgressWidth = TextRender()->TextWidth(ProgressFontSize, aProgress, -1, -1.0f);
+		TextRender()->TextColor(0.78f, 0.88f, 1.0f, 1.0f);
+		TextRender()->Text(Rect.x + maximum(PaddingX, (Rect.w - ProgressWidth) * 0.5f), TextY, ProgressFontSize, aProgress, -1.0f);
+		TextRender()->TextColor(TextRender()->DefaultTextColor());
+	}
+}
+
+void CHud::RenderFinishPredictionBar(const CUIRect &Rect, const SFinishPredictionState &State, bool ForcePreview)
+{
+	const auto Layout = HudLayout::Get(HudLayout::MODULE_FINISH_PREDICTION, m_Width, m_Height);
+	const float Scale = std::clamp(Layout.m_Scale / 100.0f, 0.25f, 3.0f);
+	const ColorRGBA BackgroundColor = ThemeHudColor(GameClient(), color_cast<ColorRGBA>(ColorHSLA(Layout.m_BackgroundColor, true)), ForcePreview, 1.0f);
+	const int Corners = HudLayout::BackgroundCorners(IGraphics::CORNER_ALL, Rect.x, Rect.y, Rect.w, Rect.h, m_Width, m_Height);
+	if(Layout.m_BackgroundEnabled)
+	{
+		IGraphics::SBlurRectRenderInfo BlurInfo;
+		BlurInfo.m_X = Rect.x;
+		BlurInfo.m_Y = Rect.y;
+		BlurInfo.m_Width = Rect.w;
+		BlurInfo.m_Height = Rect.h;
+		BlurInfo.m_Rounding = 4.0f * Scale;
+		BlurInfo.m_BlurRadius = 7.0f * Scale;
+		BlurInfo.m_BlurStrength = 1.0f;
+		BlurInfo.m_TintColor = ColorRGBA(BackgroundColor.r, BackgroundColor.g, BackgroundColor.b, 0.28f);
+		Graphics()->DrawBlurRect(BlurInfo);
+		Graphics()->DrawRect(Rect.x, Rect.y, Rect.w, Rect.h, BackgroundColor, Corners, 4.0f * Scale);
+	}
+
+	const float PaddingX = 9.0f * Scale;
+	const float BarHeight = 4.5f * Scale;
+	const float BarY = Rect.y + 20.0f * Scale;
+	const float BarX = Rect.x + PaddingX;
+	const float BarW = maximum(1.0f, Rect.w - PaddingX * 2.0f);
+	const float Progress = std::clamp(State.m_Progress, 0.0f, 1.0f);
+	const float MarkerX = BarX + BarW * Progress;
+
+	Graphics()->DrawRect(BarX, BarY, BarW, BarHeight, ColorRGBA(0.78f, 0.78f, 0.78f, 0.55f), IGraphics::CORNER_ALL, BarHeight * 0.5f);
+
+	ColorRGBA BarColor;
+	if(g_Config.m_BcFinishPredictionBarCustomColor)
+	{
+		BarColor = color_cast<ColorRGBA>(ColorHSLA(g_Config.m_BcFinishPredictionBarColor, true));
+	}
+	else
+	{
+		const int LocalClientId = GameClient()->m_aLocalIds[g_Config.m_ClDummy];
+		if(LocalClientId >= 0 && LocalClientId < MAX_CLIENTS)
+			BarColor = GameClient()->m_aClients[LocalClientId].m_RenderInfo.m_ColorBody;
+		else
+			BarColor = ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f);
+	}
+	const float MinBarW = BarHeight;
+	const float FilledW = maximum(MinBarW, std::clamp(BarW * Progress, 0.0f, BarW));
+	Graphics()->DrawRect(BarX, BarY, FilledW, BarHeight, BarColor, IGraphics::CORNER_ALL, BarHeight * 0.5f);
+
+	CTeeRenderInfo TeeInfo;
+	const int LocalClientId = GameClient()->m_aLocalIds[g_Config.m_ClDummy];
+	if(!ForcePreview && LocalClientId >= 0 && LocalClientId < MAX_CLIENTS && GameClient()->m_aClients[LocalClientId].m_Active)
+	{
+		TeeInfo = GameClient()->m_aClients[LocalClientId].m_RenderInfo;
+	}
+	else
+	{
+		TeeInfo.Apply(GameClient()->m_Skins.Find(g_Config.m_ClPlayerSkin));
+		TeeInfo.ApplyColors(g_Config.m_ClPlayerUseCustomColor, g_Config.m_ClPlayerColorBody, g_Config.m_ClPlayerColorFeet);
+	}
+	TeeInfo.m_Size = 18.0f * Scale;
+
+	const float TeeHalfWidth = 9.0f * Scale;
+	const float ClampedMarkerX = std::clamp(MarkerX, Rect.x + PaddingX + TeeHalfWidth, Rect.x + Rect.w - PaddingX - TeeHalfWidth);
+	vec2 TeeOffsetToMid;
+	CRenderTools::GetRenderTeeOffsetToRenderedTee(CAnimState::GetIdle(), &TeeInfo, TeeOffsetToMid);
+	const vec2 TeeRenderPos(ClampedMarkerX, Rect.y + 11.5f * Scale + TeeOffsetToMid.y);
+	RenderTools()->RenderTee(CAnimState::GetIdle(), &TeeInfo, EMOTE_NORMAL, vec2(1.0f, 0.0f), TeeRenderPos);
+
+	char aProgress[16];
+	const int ProgressPercent = std::clamp((int)std::lround(Progress * 100.0f), 0, 100);
+	str_format(aProgress, sizeof(aProgress), "%d%%", ProgressPercent);
+	const float PercentFontSize = 6.0f * Scale;
+	const float PercentWidth = TextRender()->TextWidth(PercentFontSize, aProgress, -1, -1.0f);
+	TextRender()->Text(Rect.x + (Rect.w - PercentWidth) * 0.5f, Rect.y + 25.8f * Scale, PercentFontSize, aProgress, -1.0f);
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
+}
+
+void CHud::RenderFinishPredictionPreview()
+{
+	RenderFinishPrediction(true);
+}
+
+CUIRect CHud::GetFinishPredictionHudEditorRect() const
+{
+	return GetFinishPredictionRect(true);
+}
+
+CUIRect CHud::GetKeystrokesKeyboardHudEditorRect() const
+{
+	return GetKeystrokesKeyboardRectInternal(true, true);
+}
+
+void CHud::RenderKeystrokesKeyboardPreview()
+{
+	RenderKeystrokesKeyboardInternal(true, true);
+}
+
+CUIRect CHud::GetKeystrokesMouseHudEditorRect() const
+{
+	return GetKeystrokesMouseRectInternal(true, true);
+}
+
+void CHud::RenderKeystrokesMousePreview()
+{
+	RenderKeystrokesMouseInternal(true, true);
+}
+
+CUIRect CHud::GetScoreHudEditorRect() const
+{
+	return GetScoreHudRect(true);
+}
+
+void CHud::RenderScoreHudPreview()
+{
+	RenderScoreHud(true);
+}
+
+CUIRect CHud::GetSpectatorCountHudEditorRect()
+{
+	return GetSpectatorCountRect(true);
+}
+
+void CHud::RenderSpectatorCountPreview()
+{
+	RenderSpectatorCount(true);
+}
+
+CUIRect CHud::GetMovementInformationHudEditorRect() const
+{
+	return GetMovementInformationRect(true);
+}
+
+void CHud::RenderMovementInformationPreview()
+{
+	RenderMovementInformation(true);
+}
+
+void CHud::RenderLocalTimePreview()
+{
+	RenderLocalTime(true);
+}
+
+CUIRect CHud::GetFrozenHudEditorRect() const
+{
+	return GetFrozenHudRect(true);
+}
+
+void CHud::RenderFrozenHudPreview()
+{
+	RenderFrozenHud(true);
 }
 
 void CHud::OnNewSnapshot()
 {
+	if(g_Config.m_BcFinishPrediction != 0)
+		EnsureFinishPredictionPathData();
+
 	if(Client()->State() != IClient::STATE_ONLINE && Client()->State() != IClient::STATE_DEMOPLAYBACK)
 		return;
 	if(!GameClient()->m_Snap.m_pGameInfoObj)
@@ -2135,6 +4042,14 @@ void CHud::OnRender()
 	if(!GameClient()->m_Snap.m_pGameInfoObj)
 		return;
 
+	if(GameClient()->m_Menus.IsActive())
+	{
+		const bool IngameGamePage = GameClient()->m_Menus.IsIngameGamePage();
+		const bool IngameSettingsPage = GameClient()->m_Menus.IsIngameSettingsPage();
+		if(!IngameGamePage && (!IngameSettingsPage || g_Config.m_BcHideHudInSettings))
+			return;
+	}
+
 	m_Width = 300.0f * Graphics()->ScreenAspect();
 	m_Height = 300.0f;
 	Graphics()->MapScreen(0.0f, 0.0f, m_Width, m_Height);
@@ -2145,6 +4060,17 @@ void CHud::OnRender()
 	if(g_Config.m_ClShowhud)
 #endif
 	{
+		// Check focus mode settings for UI elements
+		const bool FocusModeActive = g_Config.m_ClFocusMode;
+		const bool HideHudInFocusMode = g_Config.m_ClFocusModeHideHud;
+		const bool HideUIInFocusMode = g_Config.m_ClFocusModeHideUI;
+
+		if(FocusModeActive && HideHudInFocusMode)
+		{
+			RenderCursor();
+			return;
+		}
+
 		if(GameClient()->m_Snap.m_pLocalCharacter && !GameClient()->m_Snap.m_SpecInfo.m_Active && !(GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_GAMEOVER))
 		{
 			if(g_Config.m_ClShowhudHealthAmmo)
@@ -2155,7 +4081,9 @@ void CHud::OnRender()
 			{
 				RenderPlayerState(GameClient()->m_Snap.m_LocalClientId);
 			}
-			RenderSpectatorCount();
+			// Hide spectator count in focus mode
+			if(!(FocusModeActive && HideUIInFocusMode))
+				RenderSpectatorCount();
 			RenderMovementInformation();
 			RenderDDRaceEffects();
 		}
@@ -2178,27 +4106,138 @@ void CHud::OnRender()
 			RenderSpectatorHud();
 		}
 
+		if(!GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_GAMEPLAY_SPEEDRUN_TIMER) &&
+			(g_Config.m_BcSpeedrunTimer || m_SpeedrunTimerExpiredTick > 0))
+			RenderSpeedrunTimer();
+		if(!(FocusModeActive && HideUIInFocusMode))
+		{
+			RenderFinishPrediction();
+			if(!GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_VISUALS_KEYSTROKES))
+			{
+				RenderKeystrokesKeyboard();
+				RenderKeystrokesMouse();
+			}
+		}
 		if(g_Config.m_ClShowhudTimer)
 			RenderGameTimer();
 		RenderPauseNotification();
 		RenderSuddenDeath();
 		if(g_Config.m_ClShowhudScore)
 			RenderScoreHud();
-		RenderDummyActions();
+		// Hide dummy actions in focus mode
+		if(!(FocusModeActive && HideUIInFocusMode))
+			RenderDummyActions();
 		RenderWarmupTimer();
 		RenderTextInfo();
 		GameClient()->m_TClient.RenderCenterLines();
-		RenderLocalTime((m_Width / 7) * 3);
-		RenderAlignmentIndicator();
+		// Hide local time in focus mode
+		if(!(FocusModeActive && HideUIInFocusMode))
+			RenderLocalTime();
 		if(Client()->State() != IClient::STATE_DEMOPLAYBACK)
 			RenderConnectionWarning();
 		RenderTeambalanceWarning();
 		GameClient()->m_Voting.Render();
 		if(g_Config.m_ClShowRecord)
 			RenderRecord();
+
+		GameClient()->m_VoiceChat.RenderHudMuteStatusIndicator(m_Width, m_Height);
+		GameClient()->m_VoiceChat.RenderHudTalkingIndicator(m_Width, m_Height);
+		GameClient()->m_BestClient.RenderHookCombo();
+		GameClient()->m_BestClient.RenderSpecMoved();
 	}
-	RenderAutoAimCone();
 	RenderCursor();
+}
+
+void CHud::RenderSpeedrunTimer()
+{
+	if(GameClient()->m_BestClient.IsComponentDisabled(CBestClient::COMPONENT_GAMEPLAY_SPEEDRUN_TIMER))
+		return;
+
+	if(!GameClient()->m_Snap.m_pLocalCharacter)
+		return;
+
+	constexpr float SpeedrunTimerY = 20.0f;
+	constexpr float SpeedrunTimerExpiredY = 25.0f;
+
+	const int TotalConfiguredMilliseconds =
+		g_Config.m_BcSpeedrunTimerHours * 60 * 60 * 1000 +
+		g_Config.m_BcSpeedrunTimerMinutes * 60 * 1000 +
+		g_Config.m_BcSpeedrunTimerSeconds * 1000 +
+		g_Config.m_BcSpeedrunTimerMilliseconds;
+
+	// Backward compatibility with legacy MMSS config.
+	int TotalSpeedrunTimerMilliseconds = TotalConfiguredMilliseconds;
+	if(TotalSpeedrunTimerMilliseconds <= 0 && g_Config.m_BcSpeedrunTimerTime > 0)
+	{
+		const int LegacyMinutes = g_Config.m_BcSpeedrunTimerTime / 100;
+		const int LegacySeconds = g_Config.m_BcSpeedrunTimerTime % 100;
+		TotalSpeedrunTimerMilliseconds = (LegacyMinutes * 60 + LegacySeconds) * 1000;
+	}
+
+	if(TotalSpeedrunTimerMilliseconds <= 0)
+		return;
+
+	const bool RaceStarted = (GameClient()->m_Snap.m_pGameInfoObj->m_GameStateFlags & GAMESTATEFLAG_RACETIME) &&
+				 GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer < 0;
+
+	// Reset expired state when race restarts.
+	if(RaceStarted && m_SpeedrunTimerExpiredTick > 0)
+		m_SpeedrunTimerExpiredTick = 0;
+
+	// Show "TIME EXPIRED!" for 5 seconds after timer end.
+	if(m_SpeedrunTimerExpiredTick > 0)
+	{
+		const int CurrentTick = Client()->GameTick(g_Config.m_ClDummy);
+		if(CurrentTick < m_SpeedrunTimerExpiredTick + Client()->GameTickSpeed() * 5)
+		{
+			char aBuf[64];
+			str_copy(aBuf, Localize("TIME EXPIRED!"), sizeof(aBuf));
+			const float Half = m_Width / 2.0f;
+			const float FontSize = 12.0f;
+			const float w = TextRender()->TextWidth(FontSize, aBuf, -1, -1.0f);
+			TextRender()->TextColor(1.0f, 0.25f, 0.25f, 1.0f);
+			TextRender()->Text(Half - w / 2, SpeedrunTimerExpiredY, FontSize, aBuf, -1.0f);
+			TextRender()->TextColor(TextRender()->DefaultTextColor());
+		}
+		else
+		{
+			m_SpeedrunTimerExpiredTick = 0;
+		}
+		return;
+	}
+
+	if(!RaceStarted)
+		return;
+
+	const int CurrentTick = Client()->GameTick(g_Config.m_ClDummy);
+	const int StartTick = -GameClient()->m_Snap.m_pGameInfoObj->m_WarmupTimer;
+	const int ElapsedTicks = CurrentTick - StartTick;
+
+	const int64_t DeadlineTicks = (int64_t)TotalSpeedrunTimerMilliseconds * Client()->GameTickSpeed() / 1000;
+	const int64_t RemainingTicks = DeadlineTicks - ElapsedTicks;
+
+	if(RemainingTicks <= 0)
+	{
+		m_SpeedrunTimerExpiredTick = CurrentTick;
+		GameClient()->SendKill();
+		if(g_Config.m_BcSpeedrunTimerAutoDisable)
+			g_Config.m_BcSpeedrunTimer = 0;
+		return;
+	}
+
+	const int64_t RemainingMilliseconds = RemainingTicks * 1000 / Client()->GameTickSpeed();
+	char aBuf[32];
+	FormatSpeedrunTime(RemainingMilliseconds, aBuf, sizeof(aBuf));
+
+	const float Half = m_Width / 2.0f;
+	const float FontSize = 8.0f;
+	const float w = TextRender()->TextWidth(FontSize, aBuf, -1, -1.0f);
+
+	if(RemainingMilliseconds <= 60 * 1000)
+		TextRender()->TextColor(1.0f, 0.25f, 0.25f, 1.0f);
+
+	TextRender()->Text(Half - w / 2, SpeedrunTimerY, FontSize, aBuf, -1.0f);
+	TextRender()->TextColor(TextRender()->DefaultTextColor());
 }
 
 void CHud::OnMessage(int MsgType, void *pRawMsg)
@@ -2243,6 +4282,16 @@ void CHud::OnMessage(int MsgType, void *pRawMsg)
 		{
 			// ignore m_ServerTimeBest, it's handled by the game client
 			m_aPlayerRecord[g_Config.m_ClDummy] = (float)pMsg->m_PlayerTimeBest / 100;
+		}
+	}
+	else if(MsgType == NETMSGTYPE_SV_RACEFINISH)
+	{
+		CNetMsg_Sv_RaceFinish *pMsg = (CNetMsg_Sv_RaceFinish *)pRawMsg;
+		const int LocalClientId = GameClient()->m_aLocalIds[g_Config.m_ClDummy];
+		if(pMsg->m_ClientId == LocalClientId)
+		{
+			m_FinishPredictionFinishedRaceTick = GameClient()->LastRaceTick();
+			ResetFinishPredictionState(false);
 		}
 	}
 }

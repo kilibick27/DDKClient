@@ -400,6 +400,7 @@ public:
 	virtual void OnWindowResize() = 0;
 
 	virtual int OnSnapInput(int *pData, bool Dummy, bool Force) = 0;
+	virtual void PrepareInputForSend(int *pData, int Size, bool Dummy) = 0;
 	virtual void OnDummySwap() = 0;
 	virtual void SendDummyInfo(bool Start) = 0;
 
@@ -413,12 +414,14 @@ public:
 	virtual void OnDummyDisconnect() = 0;
 	virtual void DummyResetInput() = 0;
 	virtual void Echo(const char *pString) = 0;
+	virtual void Broadcast(const char *pString) = 0;
 
 	virtual bool CanDisplayWarning() const = 0;
 	virtual void RenderShutdownMessage() = 0;
 
 	virtual IMap *Map() = 0;
 	virtual const IMap *Map() const = 0;
+	virtual const char *LocalPlayerSkinName() const = 0;
 	virtual CNetObjHandler *GetNetObjHandler() = 0;
 	virtual protocol7::CNetObjHandler *GetNetObjHandler7() = 0;
 

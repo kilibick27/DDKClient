@@ -66,6 +66,8 @@ public:
 	bool IsReceivingOptions() const { return m_ReceivingOptions; }
 	int NumOptions() const { return m_NumVoteOptions; }
 	const CVoteOptionClient *FirstOption() const { return m_pFirst; }
+	void RenderHud(bool ForcePreview = false);
+	CUIRect GetHudRect(float HudWidth, float HudHeight, bool ForcePreview = false) const;
 };
 
 #endif

@@ -3,6 +3,7 @@
 
 #include <engine/client.h>
 #include <engine/discord.h>
+#include <engine/shared/http.h>
 
 #if defined(CONF_DISCORD)
 #include <discord_game_sdk.h>
@@ -32,6 +33,7 @@ class CDiscord : public IDiscord
 	DiscordActivity m_Activity;
 	bool m_UpdateActivity = false;
 	int64_t m_LastActivityUpdate = 0;
+	bool m_ShowMap = true;
 
 	IDiscordCore *m_pCore;
 	IDiscordActivityEvents m_ActivityEvents;
@@ -67,7 +69,7 @@ public:
 		DiscordCreateParamsSetDefault(&Params);
 
 		// Params.client_id = 752165779117441075; // DDNet
-		Params.client_id = 1325361453988970527; // TClient
+		Params.client_id = 1444576875774083133; // BestClient
 		Params.flags = EDiscordCreateFlags::DiscordCreateFlags_NoRequireDiscord;
 		Params.event_data = this;
 		Params.activity_events = &m_ActivityEvents;
@@ -87,6 +89,7 @@ public:
 		m_pActivityManager->register_steam(m_pActivityManager, 412220); // steam id
 
 		ClearGameInfo();
+		dbg_msg("discord", "initialized custom RPC (app_id=1444576875774083133)");
 
 		return false;
 	}
@@ -97,7 +100,10 @@ public:
 		m_Enabled = Enabled;
 
 		if(NeedsUpdate)
+		{
+			dbg_msg("discord", "rpc %s", m_Enabled ? "enabled" : "disabled");
 			InitDiscord();
+		}
 
 		if(m_pCore && m_Enabled)
 		{
@@ -118,27 +124,55 @@ public:
 	{
 		mem_zero(&m_Activity, sizeof(DiscordActivity));
 
-		str_copy(m_Activity.assets.large_image, "tclient_logo", sizeof(m_Activity.assets.large_image));
-		str_copy(m_Activity.assets.large_text, "TClient logo", sizeof(m_Activity.assets.large_text));
-		m_Activity.timestamps.start = time_timestamp();
-		str_copy(m_Activity.details, "Offline", sizeof(m_Activity.details));
+		str_copy(m_Activity.assets.large_image, "bestclientlogo", sizeof(m_Activity.assets.large_image));
+		str_copy(m_Activity.assets.large_text, "discord.gg/bestclient", sizeof(m_Activity.assets.large_text));
+		str_copy(m_Activity.details, "discord.gg/bestclient", sizeof(m_Activity.details));
+		m_Activity.timestamps.start = 0;
 		m_Activity.instance = false;
 
 		m_UpdateActivity = true;
 	}
 
-	void SetGameInfo(const CServerInfo &ServerInfo, bool Registered) override
+	void SetGameInfo(const CServerInfo &ServerInfo, const char *pMapName, const char *pPlayerName, const char *pSkinName, bool ShowMap, bool Registered) override
 	{
 		mem_zero(&m_Activity, sizeof(DiscordActivity));
 
-		str_copy(m_Activity.assets.large_image, "tclient_logo", sizeof(m_Activity.assets.large_image));
-		str_copy(m_Activity.assets.large_text, "TClient logo", sizeof(m_Activity.assets.large_text));
+		str_copy(m_Activity.assets.large_image, "bestclientlogo", sizeof(m_Activity.assets.large_image));
+		str_copy(m_Activity.assets.large_text, "discord.gg/bestclient", sizeof(m_Activity.assets.large_text));
 		m_Activity.timestamps.start = time_timestamp();
-		str_copy(m_Activity.name, "Online", sizeof(m_Activity.name));
 		m_Activity.instance = true;
+		m_ShowMap = ShowMap;
 
-		str_copy(m_Activity.details, ServerInfo.m_aName, sizeof(m_Activity.details));
-		str_copy(m_Activity.state, ServerInfo.m_aMap, sizeof(m_Activity.state));
+		if(pSkinName && pSkinName[0] != '\0')
+		{
+			char aEscapedSkinName[128];
+			EscapeUrl(aEscapedSkinName, sizeof(aEscapedSkinName), pSkinName);
+			if(aEscapedSkinName[0] == '\0')
+				str_copy(aEscapedSkinName, "default", sizeof(aEscapedSkinName));
+
+			char aSkinUrl[256];
+			str_format(aSkinUrl, sizeof(aSkinUrl), "https://best-client-api.vercel.app/api/assemble-foot/%s.png", aEscapedSkinName);
+			str_copy(m_Activity.assets.small_image, aSkinUrl, sizeof(m_Activity.assets.small_image));
+		}
+
+		if(pPlayerName && pPlayerName[0] != '\0')
+		{
+			str_copy(m_Activity.assets.small_text, pPlayerName, sizeof(m_Activity.assets.small_text));
+		}
+		else
+		{
+			str_copy(m_Activity.assets.small_text, "BestClient player", sizeof(m_Activity.assets.small_text));
+		}
+
+		str_copy(m_Activity.details, "discord.gg/bestclient", sizeof(m_Activity.details));
+		if(m_ShowMap)
+		{
+			const char *pDisplayMap = (pMapName && pMapName[0] != '\0') ? pMapName : ServerInfo.m_aMap;
+			if(pDisplayMap[0] != '\0')
+			{
+				str_copy(m_Activity.state, pDisplayMap, sizeof(m_Activity.state));
+			}
+		}
 		m_Activity.party.size.current_size = ServerInfo.m_NumClients;
 		m_Activity.party.size.max_size = ServerInfo.m_MaxClients;
 		// private makes it so the game isn't public to join, but there's 'Ask to Join' button instead
@@ -156,15 +190,38 @@ public:
 		m_UpdateActivity = true;
 	}
 
-	void UpdateServerInfo(const CServerInfo &ServerInfo) override
+	void UpdateServerInfo(const CServerInfo &ServerInfo, const char *pMapName, const char *pPlayerName, const char *pSkinName) override
 	{
 		if(!m_Activity.instance)
 			return;
 
 		UpdateServerIp(ServerInfo);
 
-		str_copy(m_Activity.details, ServerInfo.m_aName, sizeof(m_Activity.details));
-		str_copy(m_Activity.state, ServerInfo.m_aMap, sizeof(m_Activity.state));
+		if(pSkinName && pSkinName[0] != '\0')
+		{
+			char aEscapedSkinName[128];
+			EscapeUrl(aEscapedSkinName, sizeof(aEscapedSkinName), pSkinName);
+			if(aEscapedSkinName[0] == '\0')
+				str_copy(aEscapedSkinName, "default", sizeof(aEscapedSkinName));
+
+			char aSkinUrl[256];
+			str_format(aSkinUrl, sizeof(aSkinUrl), "https://best-client-api.vercel.app/api/assemble-foot/%s.png", aEscapedSkinName);
+			str_copy(m_Activity.assets.small_image, aSkinUrl, sizeof(m_Activity.assets.small_image));
+		}
+		if(pPlayerName && pPlayerName[0] != '\0')
+		{
+			str_copy(m_Activity.assets.small_text, pPlayerName, sizeof(m_Activity.assets.small_text));
+		}
+
+		if(m_ShowMap)
+		{
+			const char *pDisplayMap = (pMapName && pMapName[0] != '\0') ? pMapName : ServerInfo.m_aMap;
+			if(pDisplayMap[0] != '\0')
+			{
+				str_copy(m_Activity.state, pDisplayMap, sizeof(m_Activity.state));
+			}
+		}
+		m_Activity.party.size.current_size = ServerInfo.m_NumClients;
 		m_Activity.party.size.max_size = ServerInfo.m_MaxClients;
 		m_UpdateActivity = true;
 	}
@@ -248,8 +305,8 @@ class CDiscordStub : public IDiscord
 {
 	void Update(bool Enabled) override {}
 	void ClearGameInfo() override {}
-	void SetGameInfo(const CServerInfo &ServerInfo, bool Registered) override {}
-	void UpdateServerInfo(const CServerInfo &ServerInfo) override {}
+	void SetGameInfo(const CServerInfo &ServerInfo, const char *pMapName, const char *pPlayerName, const char *pSkinName, bool ShowMap, bool Registered) override {}
+	void UpdateServerInfo(const CServerInfo &ServerInfo, const char *pMapName, const char *pPlayerName, const char *pSkinName) override {}
 	void UpdatePlayerCount(int Count) override {}
 };
 

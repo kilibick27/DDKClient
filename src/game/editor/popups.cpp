@@ -4,6 +4,8 @@
 #include "editor.h"
 #include "editor_actions.h"
 
+#include <engine/gfx/image_loader.h>
+
 #include <base/color.h>
 
 #include <engine/font_icons.h>
@@ -38,7 +40,23 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuFile(void *pContext, CUIRect Vie
 	View.HSplitTop(12.0f, &Slot, &View);
 	if(pEditor->DoButton_MenuItem(&s_NewMapButton, "New", 0, &Slot, BUTTONFLAG_LEFT, "[Ctrl+N] Create a new map."))
 	{
-		if(pEditor->HasUnsavedData())
+		auto &Duo = pEditor->m_DuoSession;
+		if(Duo.m_State >= CDuoSession::STATE_CONNECTING)
+		{
+			if(!Duo.m_IsCreator)
+			{
+				pEditor->m_PopupEventType = POPEVENT_DUO_NEW;
+				pEditor->m_PopupEventActivated = true;
+			}
+			else
+			{
+				Duo.m_OwnerLoadingMap = true;
+				pEditor->Reset();
+				Duo.m_OwnerLoadingMap = false;
+				Duo.SendMapNew();
+			}
+		}
+		else if(pEditor->HasUnsavedData())
 		{
 			pEditor->m_PopupEventType = POPEVENT_NEW;
 			pEditor->m_PopupEventActivated = true;
@@ -165,7 +183,10 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuTools(void *pContext, CUIRect Vi
 		pEditor->Ui()->ShowPopupConfirm(Slot.x + Slot.w, Slot.y, &s_ConfirmPopupContext);
 	}
 	if(s_ConfirmPopupContext.m_Result == CUi::SConfirmPopupContext::CONFIRMED)
+	{
 		pEditor->Map()->RemoveUnusedEnvelopes();
+		pEditor->m_DuoSession.StartMapTransfer();
+	}
 	if(s_ConfirmPopupContext.m_Result != CUi::SConfirmPopupContext::UNSET)
 	{
 		s_ConfirmPopupContext.Reset();
@@ -267,10 +288,12 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		if(pEditor->DoButton_Ex(&s_ButtonNo, "No", !pEditor->m_BrushColorEnabled, &No, BUTTONFLAG_LEFT, "Disable brush coloring.", IGraphics::CORNER_L))
 		{
 			pEditor->m_BrushColorEnabled = false;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", pEditor->m_BrushColorEnabled, &Yes, BUTTONFLAG_LEFT, "Enable brush coloring.", IGraphics::CORNER_R))
 		{
 			pEditor->m_BrushColorEnabled = true;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -292,10 +315,12 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 			if(pEditor->DoButton_Ex(&s_ButtonNo, "No", pEditor->m_AllowPlaceUnusedTiles == EUnusedEntities::NOT_ALLOWED, &No, BUTTONFLAG_LEFT, "[Ctrl+U] Disallow placing unused tiles.", IGraphics::CORNER_L))
 			{
 				pEditor->m_AllowPlaceUnusedTiles = EUnusedEntities::NOT_ALLOWED;
+				pEditor->m_DuoSession.NotifyEditorSettings();
 			}
 			if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", pEditor->m_AllowPlaceUnusedTiles == EUnusedEntities::ALLOWED_EXPLICIT, &Yes, BUTTONFLAG_LEFT, "[Ctrl+U] Allow placing unused tiles.", IGraphics::CORNER_R))
 			{
 				pEditor->m_AllowPlaceUnusedTiles = EUnusedEntities::ALLOWED_EXPLICIT;
+				pEditor->m_DuoSession.NotifyEditorSettings();
 			}
 		}
 	}
@@ -319,16 +344,19 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		if(pEditor->DoButton_Ex(&s_ButtonOff, pAction->LabelShort(), pAction->Active(), &Off, BUTTONFLAG_LEFT, pAction->Description(), IGraphics::CORNER_L))
 		{
 			pAction->Call();
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		pAction = &pEditor->m_QuickActionShowInfoDec;
 		if(pEditor->DoButton_Ex(&s_ButtonDec, pAction->LabelShort(), pAction->Active(), &Dec, BUTTONFLAG_LEFT, pAction->Description(), IGraphics::CORNER_NONE))
 		{
 			pAction->Call();
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		pAction = &pEditor->m_QuickActionShowInfoHex;
 		if(pEditor->DoButton_Ex(&s_ButtonHex, pAction->LabelShort(), pAction->Active(), &Hex, BUTTONFLAG_LEFT, pAction->Description(), IGraphics::CORNER_R))
 		{
 			pAction->Call();
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -350,11 +378,13 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		{
 			pEditor->m_ShowEnvelopePreview = false;
 			pEditor->m_ActiveEnvelopePreview = EEnvelopePreview::NONE;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", pEditor->m_ShowEnvelopePreview, &Yes, BUTTONFLAG_LEFT, "Preview the paths of quads with a position envelope when a quad layer is selected.", IGraphics::CORNER_R))
 		{
 			pEditor->m_ShowEnvelopePreview = true;
 			pEditor->m_ActiveEnvelopePreview = EEnvelopePreview::NONE;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -375,10 +405,12 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		if(pEditor->DoButton_Ex(&s_ButtonNo, "No", !g_Config.m_EdAlignQuads, &No, BUTTONFLAG_LEFT, "Do not perform quad alignment to other quads/points when moving quads.", IGraphics::CORNER_L))
 		{
 			g_Config.m_EdAlignQuads = false;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", g_Config.m_EdAlignQuads, &Yes, BUTTONFLAG_LEFT, "Allow quad alignment to other quads/points when moving quads.", IGraphics::CORNER_R))
 		{
 			g_Config.m_EdAlignQuads = true;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -399,10 +431,12 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		if(pEditor->DoButton_Ex(&s_ButtonNo, "No", !g_Config.m_EdShowQuadsRect, &No, BUTTONFLAG_LEFT, "Do not show quad bounds when moving quads.", IGraphics::CORNER_L))
 		{
 			g_Config.m_EdShowQuadsRect = false;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", g_Config.m_EdShowQuadsRect, &Yes, BUTTONFLAG_LEFT, "Show quad bounds when moving quads.", IGraphics::CORNER_R))
 		{
 			g_Config.m_EdShowQuadsRect = true;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -423,10 +457,12 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		if(pEditor->DoButton_Ex(&s_ButtonNo, "No", !g_Config.m_EdAutoMapReload, &No, BUTTONFLAG_LEFT, "Do not run 'hot_reload' on the local server while rcon authed on map save.", IGraphics::CORNER_L))
 		{
 			g_Config.m_EdAutoMapReload = false;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", g_Config.m_EdAutoMapReload, &Yes, BUTTONFLAG_LEFT, "Run 'hot_reload' on the local server while rcon authed on map save.", IGraphics::CORNER_R))
 		{
 			g_Config.m_EdAutoMapReload = true;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -447,10 +483,12 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		if(pEditor->DoButton_Ex(&s_ButtonNo, "No", !g_Config.m_EdLayerSelector, &No, BUTTONFLAG_LEFT, "Do not select layers when ctrl+right clicking on a tile.", IGraphics::CORNER_L))
 		{
 			g_Config.m_EdLayerSelector = false;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", g_Config.m_EdLayerSelector, &Yes, BUTTONFLAG_LEFT, "Select layers when ctrl+right clicking on a tile.", IGraphics::CORNER_R))
 		{
 			g_Config.m_EdLayerSelector = true;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -471,10 +509,12 @@ CUi::EPopupMenuFunctionResult CEditor::PopupMenuSettings(void *pContext, CUIRect
 		if(pEditor->DoButton_Ex(&s_ButtonNo, "No", !g_Config.m_EdShowIngameEntities, &No, BUTTONFLAG_LEFT, "Do not show how weapons, shields, hearts and flags appear ingame.", IGraphics::CORNER_L))
 		{
 			g_Config.m_EdShowIngameEntities = false;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 		if(pEditor->DoButton_Ex(&s_ButtonYes, "Yes", g_Config.m_EdShowIngameEntities, &Yes, BUTTONFLAG_LEFT, "Show how weapons, shields, hearts and flags appear ingame.", IGraphics::CORNER_R))
 		{
 			g_Config.m_EdShowIngameEntities = true;
+			pEditor->m_DuoSession.NotifyEditorSettings();
 		}
 	}
 
@@ -495,6 +535,8 @@ CUi::EPopupMenuFunctionResult CEditor::PopupGroup(void *pContext, CUIRect View, 
 	{
 		if(pEditor->DoButton_Editor(&s_DeleteButton, "Delete group", 0, &Button, BUTTONFLAG_LEFT, "Delete the group."))
 		{
+			int DelGroup = pEditor->Map()->m_SelectedGroup;
+			pEditor->m_DuoSession.NotifyDelGroup(DelGroup);
 			pEditor->Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionGroup>(pEditor->Map(), pEditor->Map()->m_SelectedGroup, true));
 			pEditor->Map()->DeleteGroup(pEditor->Map()->m_SelectedGroup);
 			pEditor->Map()->m_SelectedGroup = maximum(0, pEditor->Map()->m_SelectedGroup - 1);
@@ -661,7 +703,10 @@ CUi::EPopupMenuFunctionResult CEditor::PopupGroup(void *pContext, CUIRect View, 
 		static CLineInput s_NameInput;
 		s_NameInput.SetBuffer(pEditor->Map()->m_vpGroups[pEditor->Map()->m_SelectedGroup]->m_aName, sizeof(pEditor->Map()->m_vpGroups[pEditor->Map()->m_SelectedGroup]->m_aName));
 		if(pEditor->DoEditBox(&s_NameInput, &Button, 10.0f))
+		{
 			pEditor->Map()->OnModify();
+			pEditor->m_DuoSession.NotifyRenameGroup(pEditor->Map()->m_SelectedGroup, pEditor->Map()->m_vpGroups[pEditor->Map()->m_SelectedGroup]->m_aName);
+		}
 	}
 
 	CProperty aProps[] = {
@@ -799,7 +844,10 @@ CUi::EPopupMenuFunctionResult CEditor::PopupLayer(void *pContext, CUIRect View, 
 		static CLineInput s_NameInput;
 		s_NameInput.SetBuffer(pCurrentLayer->m_aName, sizeof(pCurrentLayer->m_aName));
 		if(pEditor->DoEditBox(&s_NameInput, &EditBox, 10.0f))
+		{
 			pEditor->Map()->OnModify();
+			pEditor->m_DuoSession.NotifyRenameLayer(pEditor->Map()->m_SelectedGroup, pEditor->Map()->m_vSelectedLayers[0], pCurrentLayer->m_aName);
+		}
 	}
 
 	// spacing if any button was rendered
@@ -1058,6 +1106,11 @@ CUi::EPopupMenuFunctionResult CEditor::PopupQuad(void *pContext, CUIRect View, b
 	if(Prop == EQuadProp::ORDER && pLayer)
 	{
 		const int QuadIndex = pLayer->SwapQuads(pEditor->Map()->m_vSelectedQuads[pQuadPopupContext->m_SelectedQuadIndex], NewVal);
+		pEditor->m_DuoSession.NotifyQuadProp(
+			pEditor->Map()->m_SelectedGroup,
+			pEditor->Map()->m_vSelectedLayers[0],
+			pEditor->Map()->m_vSelectedQuads[pQuadPopupContext->m_SelectedQuadIndex],
+			(int)EQuadProp::ORDER, NewVal);
 		pEditor->Map()->m_vSelectedQuads[pQuadPopupContext->m_SelectedQuadIndex] = QuadIndex;
 	}
 
@@ -1122,6 +1175,25 @@ CUi::EPopupMenuFunctionResult CEditor::PopupQuad(void *pContext, CUIRect View, b
 
 	if(Prop != EQuadProp::NONE && (State == EEditState::END || State == EEditState::ONE_GO))
 	{
+		const int GroupIdx = pEditor->Map()->m_SelectedGroup;
+		const int LayerIdx = pEditor->Map()->m_vSelectedLayers[0];
+		const auto &vSelQuads = pEditor->Map()->m_vSelectedQuads;
+		for(int k = 0; k < (int)vpQuads.size() && k < (int)vSelQuads.size(); k++)
+		{
+			int QuadIdx = vSelQuads[k];
+			CQuad *pQ = vpQuads[k];
+			if(Prop == EQuadProp::POS_X || Prop == EQuadProp::POS_Y)
+				pEditor->m_DuoSession.NotifyQuadPoints(GroupIdx, LayerIdx, QuadIdx, pQ->m_aPoints);
+			else if(Prop == EQuadProp::COLOR)
+				pEditor->m_DuoSession.NotifyQuadColors(GroupIdx, LayerIdx, QuadIdx, pQ->m_aColors);
+			else
+				pEditor->m_DuoSession.NotifyQuadProp(GroupIdx, LayerIdx, QuadIdx, (int)Prop, [&]() -> int {
+					if(Prop == EQuadProp::POS_ENV)        return pQ->m_PosEnv;
+					if(Prop == EQuadProp::POS_ENV_OFFSET) return pQ->m_PosEnvOffset;
+					if(Prop == EQuadProp::COLOR_ENV)      return pQ->m_ColorEnv;
+					return pQ->m_ColorEnvOffset;
+				}());
+		}
 		pEditor->Map()->m_QuadTracker.EndQuadPropTrack(Prop);
 		pEditor->Map()->OnModify();
 	}
@@ -1392,6 +1464,28 @@ CUi::EPopupMenuFunctionResult CEditor::PopupPoint(void *pContext, CUIRect View, 
 
 	if(Prop != EQuadPointProp::NONE && (State == EEditState::END || State == EEditState::ONE_GO))
 	{
+		const int GroupIdx = pEditor->Map()->m_SelectedGroup;
+		const int LayerIdx = pEditor->Map()->m_vSelectedLayers[0];
+		const auto &vSelQuads = pEditor->Map()->m_vSelectedQuads;
+		for(int k = 0; k < (int)vpQuads.size() && k < (int)vSelQuads.size(); k++)
+		{
+			int QuadIdx = vSelQuads[k];
+			CQuad *pQ = vpQuads[k];
+			if(Prop == EQuadPointProp::POS_X || Prop == EQuadPointProp::POS_Y)
+				pEditor->m_DuoSession.NotifyQuadPoints(GroupIdx, LayerIdx, QuadIdx, pQ->m_aPoints);
+			else if(Prop == EQuadPointProp::COLOR)
+				pEditor->m_DuoSession.NotifyQuadColors(GroupIdx, LayerIdx, QuadIdx, pQ->m_aColors);
+			else
+			{
+				for(int v = 0; v < 4; v++)
+				{
+					if(!pEditor->Map()->IsQuadCornerSelected(v))
+						continue;
+					int Val = (Prop == EQuadPointProp::TEX_U) ? pQ->m_aTexcoords[v].x : pQ->m_aTexcoords[v].y;
+					pEditor->m_DuoSession.NotifyQuadPointProp(GroupIdx, LayerIdx, QuadIdx, v, (int)Prop, Val);
+				}
+			}
+		}
 		pEditor->Map()->m_QuadTracker.EndQuadPointPropTrack(Prop);
 		pEditor->Map()->OnModify();
 	}
@@ -1735,6 +1829,10 @@ CUi::EPopupMenuFunctionResult CEditor::PopupImage(void *pContext, CUIRect View, 
 				pEditor->ShowFileDialogError("Embedding is not possible because the image could not be loaded.");
 				return CUi::POPUP_KEEP_OPEN;
 			}
+			int ImgIdx = pEditor->Map()->m_SelectedImage;
+			CByteBufferWriter PngWriter;
+			if(CImageLoader::SavePng(PngWriter, *pImg))
+				pEditor->m_DuoSession.NotifyEmbedImage(ImgIdx, PngWriter.Data(), (int)PngWriter.Size());
 			pImg->m_External = 0;
 			return CUi::POPUP_CLOSE_CURRENT;
 		}
@@ -1745,6 +1843,7 @@ CUi::EPopupMenuFunctionResult CEditor::PopupImage(void *pContext, CUIRect View, 
 	{
 		if(pEditor->DoButton_MenuItem(&s_ExternalButton, "Make external", 0, &Slot, BUTTONFLAG_LEFT, "Remove the image from the map file."))
 		{
+			pEditor->m_DuoSession.NotifyExternImage(pEditor->Map()->m_SelectedImage);
 			pImg->m_External = 1;
 			return CUi::POPUP_CLOSE_CURRENT;
 		}
@@ -1806,6 +1905,7 @@ CUi::EPopupMenuFunctionResult CEditor::PopupImage(void *pContext, CUIRect View, 
 		}
 		else
 		{
+			pEditor->m_DuoSession.NotifyDelImage(pEditor->Map()->m_SelectedImage);
 			pEditor->Map()->m_vpImages.erase(pEditor->Map()->m_vpImages.begin() + pEditor->Map()->m_SelectedImage);
 			pEditor->Map()->ModifyImageIndex(gs_ModifyIndexDeleted(pEditor->Map()->m_SelectedImage));
 		}
@@ -1915,6 +2015,7 @@ CUi::EPopupMenuFunctionResult CEditor::PopupSound(void *pContext, CUIRect View, 
 		}
 		else
 		{
+			pEditor->m_DuoSession.NotifyDelSound(pEditor->Map()->m_SelectedSound);
 			pEditor->Map()->m_vpSounds.erase(pEditor->Map()->m_vpSounds.begin() + pEditor->Map()->m_SelectedSound);
 			pEditor->Map()->ModifySoundIndex(gs_ModifyIndexDeleted(pEditor->Map()->m_SelectedSound));
 			pEditor->m_ToolbarPreviewSound = -1;
@@ -2114,6 +2215,21 @@ CUi::EPopupMenuFunctionResult CEditor::PopupEvent(void *pContext, CUIRect View, 
 			return CUi::POPUP_CLOSE_CURRENT;
 		}
 	}
+	else if(pEditor->m_PopupEventType == POPEVENT_DUO_LOAD)
+	{
+		pTitle = "Duo session active";
+		pMessage = "You are in a duo mapping session. Loading a new map will disconnect you from the session.\n\nContinue anyway?";
+	}
+	else if(pEditor->m_PopupEventType == POPEVENT_DUO_NOT_OWNER)
+	{
+		pTitle = "Duo session active";
+		pMessage = "You are in a duo mapping session as a joiner.\nOnly the owner can load maps.\n\nDisconnect from the session to load a map yourself.";
+	}
+	else if(pEditor->m_PopupEventType == POPEVENT_DUO_NEW)
+	{
+		pTitle = "Duo session active";
+		pMessage = "You are in a duo mapping session as a joiner.\nOnly the owner can create a new map.\n\nDisconnect from the session to create a new map yourself.";
+	}
 	else
 	{
 		dbg_assert_failed("m_PopupEventType invalid");
@@ -2145,7 +2261,7 @@ CUi::EPopupMenuFunctionResult CEditor::PopupEvent(void *pContext, CUIRect View, 
 		static int s_CancelButton = 0;
 		if(pEditor->DoButton_Editor(&s_CancelButton, "Cancel", 0, &Button, BUTTONFLAG_LEFT, nullptr))
 		{
-			if(pEditor->m_PopupEventType == POPEVENT_LOADDROP)
+			if(pEditor->m_PopupEventType == POPEVENT_LOADDROP || pEditor->m_PopupEventType == POPEVENT_DUO_LOAD)
 				pEditor->m_aFilenamePendingLoad[0] = 0;
 
 			else if(pEditor->m_PopupEventType == POPEVENT_TILE_ART_BIG_IMAGE || pEditor->m_PopupEventType == POPEVENT_TILE_ART_MANY_COLORS)
@@ -2161,6 +2277,35 @@ CUi::EPopupMenuFunctionResult CEditor::PopupEvent(void *pContext, CUIRect View, 
 
 	if(pEditor->m_PopupEventType == POPEVENT_RESTARTING_SERVER)
 		return CUi::POPUP_KEEP_OPEN;
+
+	// POPEVENT_DUO_NOT_OWNER: custom buttons — Cancel / Disconnect
+	if(pEditor->m_PopupEventType == POPEVENT_DUO_NOT_OWNER)
+	{
+		ButtonBar.VSplitRight(110.0f, &ButtonBar, &Button);
+		static int s_DisconnectButton = 0;
+		if(pEditor->DoButton_Editor(&s_DisconnectButton, "Disconnect", 0, &Button, BUTTONFLAG_LEFT, nullptr))
+		{
+			pEditor->m_DuoSession.Disconnect();
+			pEditor->m_PopupEventWasActivated = false;
+			return CUi::POPUP_CLOSE_CURRENT;
+		}
+		return CUi::POPUP_KEEP_OPEN;
+	}
+
+	// POPEVENT_DUO_NEW: custom buttons — Cancel / Disconnect
+	if(pEditor->m_PopupEventType == POPEVENT_DUO_NEW)
+	{
+		ButtonBar.VSplitRight(110.0f, &ButtonBar, &Button);
+		static int s_DisconnectNewButton = 0;
+		if(pEditor->DoButton_Editor(&s_DisconnectNewButton, "Disconnect", 0, &Button, BUTTONFLAG_LEFT, nullptr))
+		{
+			pEditor->m_DuoSession.Disconnect();
+			pEditor->Reset();
+			pEditor->m_PopupEventWasActivated = false;
+			return CUi::POPUP_CLOSE_CURRENT;
+		}
+		return CUi::POPUP_KEEP_OPEN;
+	}
 
 	ButtonBar.VSplitRight(110.0f, &ButtonBar, &Button);
 	static int s_ConfirmButton = 0;
@@ -2193,6 +2338,7 @@ CUi::EPopupMenuFunctionResult CEditor::PopupEvent(void *pContext, CUIRect View, 
 		else if(pEditor->m_PopupEventType == POPEVENT_PLACE_BORDER_TILES)
 		{
 			pEditor->Map()->PlaceBorderTiles();
+			pEditor->m_DuoSession.NotifyFullSync();
 		}
 		else if(pEditor->m_PopupEventType == POPEVENT_TILE_ART_BIG_IMAGE)
 		{
@@ -2201,18 +2347,22 @@ CUi::EPopupMenuFunctionResult CEditor::PopupEvent(void *pContext, CUIRect View, 
 		else if(pEditor->m_PopupEventType == POPEVENT_TILE_ART_MANY_COLORS)
 		{
 			pEditor->AddTileArt();
+			pEditor->m_DuoSession.StartMapTransfer();
 		}
 		else if(pEditor->m_PopupEventType == POPEVENT_QUAD_ART_BIG_IMAGE)
 		{
 			pEditor->AddQuadArt();
+			pEditor->m_DuoSession.StartMapTransfer();
 		}
 		else if(pEditor->m_PopupEventType == POPEVENT_REMOVE_USED_IMAGE)
 		{
+			pEditor->m_DuoSession.NotifyDelImage(pEditor->Map()->m_SelectedImage);
 			pEditor->Map()->m_vpImages.erase(pEditor->Map()->m_vpImages.begin() + pEditor->Map()->m_SelectedImage);
 			pEditor->Map()->ModifyImageIndex(gs_ModifyIndexDeleted(pEditor->Map()->m_SelectedImage));
 		}
 		else if(pEditor->m_PopupEventType == POPEVENT_REMOVE_USED_SOUND)
 		{
+			pEditor->m_DuoSession.NotifyDelSound(pEditor->Map()->m_SelectedSound);
 			pEditor->Map()->m_vpSounds.erase(pEditor->Map()->m_vpSounds.begin() + pEditor->Map()->m_SelectedSound);
 			pEditor->Map()->ModifySoundIndex(gs_ModifyIndexDeleted(pEditor->Map()->m_SelectedSound));
 			pEditor->m_ToolbarPreviewSound = -1;
@@ -2223,6 +2373,14 @@ CUi::EPopupMenuFunctionResult CEditor::PopupEvent(void *pContext, CUIRect View, 
 			pGameClient->m_LocalServer.KillServer();
 			pEditor->m_PopupEventType = CEditor::POPEVENT_RESTARTING_SERVER;
 			pEditor->m_PopupEventActivated = true;
+		}
+		else if(pEditor->m_PopupEventType == POPEVENT_DUO_LOAD)
+		{
+			pEditor->m_DuoSession.Disconnect();
+			int Result = pEditor->Load(pEditor->m_aFilenamePendingLoad, pEditor->m_PendingLoadStorageType);
+			if(Result)
+				pEditor->Map()->m_ValidSaveFilename = pEditor->m_PendingLoadStorageType == IStorage::TYPE_SAVE && pEditor->m_FileBrowser.IsValidSaveFilename();
+			pEditor->m_aFilenamePendingLoad[0] = 0;
 		}
 		pEditor->m_PopupEventWasActivated = false;
 		return CUi::POPUP_CLOSE_CURRENT;
@@ -3194,6 +3352,7 @@ CUi::EPopupMenuFunctionResult CEditor::PopupQuadArt(void *pContext, CUIRect View
 		else
 		{
 			pEditor->AddQuadArt();
+			pEditor->m_DuoSession.StartMapTransfer();
 		}
 		return CUi::POPUP_CLOSE_CURRENT;
 	}

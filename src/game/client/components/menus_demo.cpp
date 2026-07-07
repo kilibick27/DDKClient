@@ -372,7 +372,7 @@ void CMenus::RenderDemoPlayer(CUIRect MainView)
 		{
 			LiveButton.Draw(ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f), IGraphics::CORNER_ALL, 3.0f);
 		}
-		if(Ui()->DoButtonLogic(&s_LiveButtonId, 0, &LiveButton, BUTTONFLAG_LEFT))
+		if(Ui()->DoButtonLogic(&s_LiveButtonId, 0, &LiveButton, BUTTONFLAG_LEFT, CUi::EButtonSoundType::BUTTON))
 		{
 			PositionToSeek = 1.0f;
 			DemoPlayer()->SetSpeedIndex(DEMO_SPEED_INDEX_DEFAULT);

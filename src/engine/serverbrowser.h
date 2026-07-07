@@ -83,6 +83,8 @@ public:
 		char m_aaSkin7[protocol7::NUM_SKINPARTS][protocol7::MAX_SKIN_LENGTH];
 		bool m_aUseCustomSkinColor7[protocol7::NUM_SKINPARTS];
 		int m_aCustomSkinColor7[protocol7::NUM_SKINPARTS];
+		bool m_BestClient;
+		bool m_BestClientDeveloper;
 	};
 
 	int m_ServerIndex;
@@ -123,6 +125,10 @@ public:
 	CClient m_aClients[SERVERINFO_MAX_CLIENTS];
 	int m_NumFilteredPlayers;
 	bool m_RequiresLogin;
+	int m_NumBestClientPlayers;
+	bool m_HasBestClientPlayers;
+	int m_NumBestClientDeveloperPlayers;
+	bool m_HasBestClientDeveloperPlayers;
 
 	static int EstimateLatency(int Loc1, int Loc2);
 	static bool ParseLocation(int *pResult, const char *pString);
@@ -272,23 +278,25 @@ class IServerBrowser : public IInterface
 {
 	MACRO_INTERFACE("serverbrowser")
 public:
-	/* Constants: Server Browser Sorting
-		SORT_NAME - Sort by name.
-		SORT_PING - Sort by ping.
-		SORT_MAP - Sort by map
-		SORT_GAMETYPE - Sort by game type. DM, TDM etc.
-		SORT_NUMPLAYERS - Sort after how many players there are on the server.
-		SORT_NUMFRIENDS - Sort after how many friends there are on the server.
-	*/
-	enum
-	{
-		SORT_NAME = 0,
-		SORT_PING,
-		SORT_MAP,
-		SORT_GAMETYPE,
-		SORT_NUMPLAYERS,
-		SORT_NUMFRIENDS,
-	};
+		/* Constants: Server Browser Sorting
+			SORT_NAME - Sort by name.
+			SORT_PING - Sort by ping.
+			SORT_MAP - Sort by map
+			SORT_GAMETYPE - Sort by game type. DM, TDM etc.
+			SORT_NUMPLAYERS - Sort after how many players there are on the server.
+			SORT_NUMFRIENDS - Sort after how many friends there are on the server.
+			SORT_NUMBESTCLIENT - Sort after how many BestClient players there are on the server.
+		*/
+		enum
+		{
+			SORT_NAME = 0,
+			SORT_PING,
+			SORT_MAP,
+			SORT_GAMETYPE,
+			SORT_NUMPLAYERS,
+			SORT_NUMFRIENDS,
+			SORT_NUMBESTCLIENT,
+		};
 
 	enum
 	{
@@ -326,6 +334,13 @@ public:
 
 		CServerEntry *m_pPrevReq; // request list
 		CServerEntry *m_pNextReq;
+	};
+
+	struct CBestClientPlayerEntry
+	{
+		char m_aServerAddress[MAX_SERVER_ADDRESSES * NETADDR_MAXSTRSIZE];
+		char m_aName[MAX_NAME_LENGTH];
+		bool m_Developer;
 	};
 
 	static constexpr const char *COMMUNITY_DDNET = "ddnet";
@@ -382,6 +397,7 @@ public:
 	virtual CServerEntry *Find(const NETADDR &Addr) = 0;
 	virtual int GetCurrentType() = 0;
 	virtual const char *GetTutorialServer() = 0;
+	virtual void SetBestClientPlayers(const std::vector<CBestClientPlayerEntry> &vPlayers) = 0;
 };
 
 #endif

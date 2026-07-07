@@ -18,6 +18,7 @@ MACRO_CONFIG_INT(TcShowChatClient, tc_show_chat_client, 1, 0, 1, CFGFLAG_CLIENT 
 MACRO_CONFIG_INT(TcShowFrozenText, tc_frozen_tees_text, 0, 0, 2, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show how many tees in your team are currently frozen. (0 - off, 1 - show alive, 2 - show frozen)")
 MACRO_CONFIG_INT(TcShowFrozenHud, tc_frozen_tees_hud, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show frozen tee HUD")
 MACRO_CONFIG_INT(TcShowFrozenHudSkins, tc_frozen_tees_hud_skins, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Use ninja skin, or darkened skin for frozen tees on hud")
+MACRO_CONFIG_INT(TcFrozenHudExpandDir, tc_frozen_tees_hud_expand_dir, 0, 0, 2, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Frozen tee HUD expansion direction (0 - right, 1 - left, 2 - center)")
 
 MACRO_CONFIG_INT(TcFrozenHudTeeSize, tc_frozen_tees_size, 15, 8, 20, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Size of tees in frozen tee hud. (Default : 15)")
 MACRO_CONFIG_INT(TcFrozenMaxRows, tc_frozen_tees_max_rows, 1, 1, 6, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Maximum number of rows in frozen tee HUD display")
@@ -69,6 +70,7 @@ MACRO_CONFIG_INT(TcAntiPingUncertaintyScale, tc_antiping_uncertainty_scale, 150,
 MACRO_CONFIG_INT(TcColorFreeze, tc_color_freeze, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Use skin colors for frozen tees")
 MACRO_CONFIG_INT(TcColorFreezeDarken, tc_color_freeze_darken, 90, 0, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Makes color of tees darker when in freeze (0-100)")
 MACRO_CONFIG_INT(TcColorFreezeFeet, tc_color_freeze_feet, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Also use color for frozen tee feet")
+MACRO_CONFIG_STR(TcFrozenSkin, tc_frozen_skin, 24, "", CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "Skin to show on frozen players, empty keeps the default behavior")
 
 // Revert Variables
 MACRO_CONFIG_INT(TcSmoothPredictionMargin, tc_prediction_margin_smooth, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Makes prediction margin transition smooth, causes worse ping jitter adjustment (reverts a DDNet change)")
@@ -154,6 +156,8 @@ MACRO_CONFIG_INT(TcProfileFlag, tc_profile_flag, 0, 0, 1, CFGFLAG_CLIENT | CFGFL
 MACRO_CONFIG_INT(TcProfileColors, tc_profile_colors, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Apply colors in profiles")
 MACRO_CONFIG_INT(TcProfileEmote, tc_profile_emote, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Apply emote in profiles")
 MACRO_CONFIG_INT(TcProfileOverwriteClanWithEmpty, tc_profile_overwrite_clan_with_empty, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Overwrite clan name even if profile has an empty clan name")
+MACRO_CONFIG_INT(TcProfileAssetsTiles, tc_profile_assets_tiles, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Apply tile assets (entities) in profiles")
+MACRO_CONFIG_INT(TcProfileAssetsGunpacks, tc_profile_assets_gunpacks, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Apply gunpack assets in profiles")
 
 // Rainbow
 MACRO_CONFIG_INT(TcRainbowTees, tc_rainbow_tees, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Turn on rainbow client side")
@@ -210,6 +214,8 @@ MACRO_CONFIG_INT(TcAutoReplyMuted, tc_auto_reply_muted, 0, 0, 1, CFGFLAG_CLIENT 
 MACRO_CONFIG_STR(TcAutoReplyMutedMessage, tc_auto_reply_muted_message, 128, "I have muted you", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Message to reply to muted players")
 MACRO_CONFIG_INT(TcAutoReplyMinimized, tc_auto_reply_minimized, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Auto reply when your game is minimized")
 MACRO_CONFIG_STR(TcAutoReplyMinimizedMessage, tc_auto_reply_minimized_message, 128, "I am not tabbed in", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Message to reply when your game is minimized")
+MACRO_CONFIG_INT(TcAutoReplyFocusMode, tc_auto_reply_focus_mode, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Auto reply when focus mode is active and chat is hidden")
+MACRO_CONFIG_STR(TcAutoReplyFocusModeMessage, tc_auto_reply_focus_mode_message, 128, "I am in focus mode, chat is hidden", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Message to reply when focus mode hides chat")
 
 // Voting
 MACRO_CONFIG_INT(TcAutoVoteWhenFar, tc_auto_vote_when_far, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Auto vote no if you far on a map")
@@ -221,17 +227,24 @@ MACRO_CONFIG_STR(TcCustomFont, tc_custom_font, 255, "DejaVu Sans", CFGFLAG_CLIEN
 
 // Bg Draw
 MACRO_CONFIG_INT(TcBgDrawWidth, tc_bg_draw_width, 5, 1, 50, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Width of background draw strokes")
+MACRO_CONFIG_INT(TcBgDrawEraserSize, tc_bg_draw_eraser_size, 10, 1, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Size of the background draw eraser")
 MACRO_CONFIG_INT(TcBgDrawFadeTime, tc_bg_draw_fade_time, 0, 0, 600, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Time until strokes disappear (0 = never)")
 MACRO_CONFIG_INT(TcBgDrawMaxItems, tc_bg_draw_max_items, 128, 0, 2048, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Maximum number of strokes")
 MACRO_CONFIG_COL(TcBgDrawColor, tc_bg_draw_color, 14024576, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Color of background draw strokes")
 MACRO_CONFIG_INT(TcBgDrawAutoSaveLoad, tc_bg_draw_auto_save_load, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Automatically save and load background drawings")
 
 // Translate
-MACRO_CONFIG_STR(TcTranslateBackend, tc_translate_backend, 32, "ftapi", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Translate backends (ftapi, libretranslate)")
-MACRO_CONFIG_STR(TcTranslateTarget, tc_translate_target, 16, "en", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Translate target language (must be 2 character ISO 639 code)")
+MACRO_CONFIG_STR(TcTranslateBackend, tc_translate_backend, 32, "google", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Translate backends (google, ftapi, libretranslate)")
+MACRO_CONFIG_STR(BcTranslateIncomingSource, bc_translate_incoming_source, 16, "auto", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Source language for incoming chat translation (use auto to detect)")
+MACRO_CONFIG_STR(BcTranslateIncomingIgnoreLanguages, bc_translate_incoming_ignore_languages, 128, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Semicolon-separated source languages that should not be auto-translated, e.g. ru; en; zh")
+MACRO_CONFIG_STR(TcTranslateTarget, tc_translate_target, 16, "en", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Target language for incoming chat translation")
+MACRO_CONFIG_STR(BcTranslateOutgoingSource, bc_translate_outgoing_source, 16, "auto", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Source language for your outgoing chat translation (use auto to detect)")
+MACRO_CONFIG_STR(BcTranslateOutgoingTarget, bc_translate_outgoing_target, 16, "en", CFGFLAG_CLIENT | CFGFLAG_SAVE, "Target language for your outgoing chat translation")
 MACRO_CONFIG_STR(TcTranslateEndpoint, tc_translate_endpoint, 256, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "For backends which need it, endpoint to use (must be https)")
 MACRO_CONFIG_STR(TcTranslateKey, tc_translate_key, 256, "", CFGFLAG_CLIENT | CFGFLAG_SAVE, "For backends which need it, api key to use")
-MACRO_CONFIG_INT(TcTranslateAuto, tc_translate_auto, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Automatically translate messages, only some backends support this (FTApi does not)")
+MACRO_CONFIG_INT(TcTranslateAutoIncoming, tc_translate_auto_incoming, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable automatic translation of incoming chat messages (other players)")
+MACRO_CONFIG_INT(TcTranslateAutoOutgoing, tc_translate_auto_outgoing, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Enable automatic translation of your outgoing chat messages")
+MACRO_CONFIG_INT(TcTranslateAuto, tc_translate_auto, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DEPRECATED (migrates on startup): use tc_translate_auto_incoming and tc_translate_auto_outgoing")
 
 // Animations
 MACRO_CONFIG_INT(TcAnimateWheelTime, tc_animate_wheel_time, 80, 0, 1000, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Duration of emote and bind wheel animations, in milliseconds (0 == no animation, 1000 = 1 second)")
@@ -275,6 +288,7 @@ MACRO_CONFIG_INT(TcShowLocalTimeSeconds, tc_show_local_time_seconds, 1, 0, 1, CF
 // Configs tab UI
 MACRO_CONFIG_INT(TcUiShowDDNet, tc_ui_show_ddnet, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show DDNet domain in Configs tab")
 MACRO_CONFIG_INT(TcUiShowTClient, tc_ui_show_tclient, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show TClient domain in Configs tab")
+MACRO_CONFIG_INT(TcUiShowBestClient, tc_ui_show_bestclient, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show BestClient domain in Configs tab")
 MACRO_CONFIG_INT(TcUiOnlyModified, tc_ui_only_modified, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show only modified settings in Configs tab")
 MACRO_CONFIG_INT(TcUiCompactList, tc_ui_compact_list, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Use compact row layout in Configs tab")
 
@@ -282,3 +296,31 @@ MACRO_CONFIG_INT(TcUiCompactList, tc_ui_compact_list, 0, 0, 1, CFGFLAG_CLIENT | 
 MACRO_CONFIG_INT(TcShowhudDummyPosition, tc_showhud_dummy_position, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show ingame HUD (Dummy Position)")
 MACRO_CONFIG_INT(TcShowhudDummySpeed, tc_showhud_dummy_speed, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show ingame HUD (Dummy Speed)")
 MACRO_CONFIG_INT(TcShowhudDummyAngle, tc_showhud_dummy_angle, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "Show ingame HUD (Dummy Aim Angle)")
+
+// DDK Settings - Potato Mode
+MACRO_CONFIG_INT(DdkPotatoMode, ddk_potato_mode, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode - disables heavy visuals to maximize FPS")
+MACRO_CONFIG_INT(DdkPotatoSavedParticles, ddk_potato_saved_particles, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: particles")
+MACRO_CONFIG_INT(DdkPotatoSavedBackgrounds, ddk_potato_saved_backgrounds, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: backgrounds")
+MACRO_CONFIG_INT(DdkPotatoSavedMotionBlur, ddk_potato_saved_motion_blur, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: motion blur")
+MACRO_CONFIG_INT(DdkPotatoSaved3dParticles, ddk_potato_saved_3d_particles, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: 3D particles")
+MACRO_CONFIG_INT(DdkPotatoSavedTrail, ddk_potato_saved_trail, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: tee trail")
+// Potato Mode: which features to disable (1 = disable this feature in potato mode)
+MACRO_CONFIG_INT(DdkPotatoDisableParticles, ddk_potato_disable_particles, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable particles")
+MACRO_CONFIG_INT(DdkPotatoDisableMotionBlur, ddk_potato_disable_motion_blur, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable motion blur")
+MACRO_CONFIG_INT(DdkPotatoDisable3dParticles, ddk_potato_disable_3d_particles, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable 3D particles")
+MACRO_CONFIG_INT(DdkPotatoDisableTrail, ddk_potato_disable_trail, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable tee trail")
+MACRO_CONFIG_INT(DdkPotatoDisableJelly, ddk_potato_disable_jelly, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable jelly tee")
+MACRO_CONFIG_INT(DdkPotatoDisableBackground, ddk_potato_disable_background, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable media background")
+MACRO_CONFIG_INT(DdkPotatoDisableNameplates, ddk_potato_disable_nameplates, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable nameplates")
+MACRO_CONFIG_INT(DdkPotatoDisableChat, ddk_potato_disable_chat, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable chat")
+MACRO_CONFIG_INT(DdkPotatoDisableHighDetail, ddk_potato_disable_high_detail, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato: disable high detail")
+// saved values for restore
+MACRO_CONFIG_INT(DdkPotatoSavedNameplates, ddk_potato_saved_nameplates, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: nameplates")
+MACRO_CONFIG_INT(DdkPotatoSavedChat, ddk_potato_saved_chat, 1, 0, 2, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: chat")
+MACRO_CONFIG_INT(DdkPotatoSavedHighDetail, ddk_potato_saved_high_detail, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Potato Mode saved: high detail")
+
+// DDK FlyHelper
+MACRO_CONFIG_INT(DdkAutoFollowNearest, ddk_auto_follow_nearest, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto Follow Nearest toggle")
+MACRO_CONFIG_INT(DdkFlyAimHelper, ddk_fly_aim_helper, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Fly Aim Helper toggle")
+
+

@@ -28,6 +28,16 @@
 
 // components
 #include "components/background.h"
+#include "components/bestclient/3d_particles.h"
+#include "components/bestclient/admin_panel.h"
+#include "components/bestclient/bestclient.h"
+#include "components/bestclient/clientindicator/client_indicator.h"
+#include "components/bestclient/fast_actions.h"
+#include "components/bestclient/fast_practice.h"
+#include "components/bestclient/hud_editor.h"
+#include "components/bestclient/music_player.h"
+#include "components/bestclient/translate.h"
+#include "components/bestclient/voice/voice.h"
 #include "components/binds.h"
 #include "components/broadcast.h"
 #include "components/camera.h"
@@ -81,12 +91,12 @@
 #include "components/tclient/statusbar.h"
 #include "components/tclient/tclient.h"
 #include "components/tclient/trails.h"
-#include "components/tclient/translate.h"
 #include "components/tclient/warlist.h"
 #include "components/tooltips.h"
 #include "components/touch_controls.h"
 #include "components/voting.h"
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -162,6 +172,7 @@ class CGameClient : public IGameClient
 {
 public:
 	friend class CTClient;
+	friend class CFastPractice;
 
 	// all components
 	CInfoMessages m_InfoMessages;
@@ -209,6 +220,15 @@ public:
 
 	CRaceDemo m_RaceDemo;
 	CGhost m_Ghost;
+	C3DParticles m_3DParticles;
+	CClientIndicator m_ClientIndicator;
+	CMusicPlayer m_MusicPlayer;
+	CHudEditor m_HudEditor;
+	CAdminPanel m_AdminPanel;
+	CFastActions m_FastActions;
+	CFastPractice m_FastPractice;
+	CBestClient m_BestClient;
+	CVoiceChat m_VoiceChat;
 
 	CTooltips m_Tooltips;
 
@@ -232,8 +252,8 @@ public:
 	CScripting m_Scripting;
 	CMod m_Mod;
 	CCustomCommunities m_CustomCommunities;
-	CMovingTiles m_MovingTilesBackground = CMovingTiles{ false };
-	CMovingTiles m_MovingTilesForeground = CMovingTiles{ true };
+	CMovingTiles m_MovingTilesBackground = CMovingTiles{false};
+	CMovingTiles m_MovingTilesForeground = CMovingTiles{true};
 
 private:
 	std::vector<class CComponent *> m_vpAll;
@@ -270,6 +290,9 @@ private:
 
 	void ProcessEvents();
 	void UpdatePositions();
+	void UpdateAutoTeamLock();
+	void OptimizerUpdateProcessPriorities();
+	void RenderOptimizerFpsFogRect();
 
 	int m_EditorMovementDelay = 5;
 	void UpdateEditorIngameMoved();
@@ -284,6 +307,11 @@ private:
 	int m_LastFlagCarrierBlue;
 
 	int m_aCheckInfo[NUM_DUMMIES];
+	unsigned long m_OptimizerDdnetPrevPriorityClass = 0;
+	unsigned long m_OptimizerDdnetLastSetPriorityClass = 0; // cache: last value passed to SetPriorityClass for current process
+	bool m_OptimizerDdnetPriorityHighActive = false;
+	bool m_OptimizerDiscordPriorityBelowNormalActive = false;
+	float m_OptimizerDiscordPriorityLastUpdateTime = -1.0f;
 
 	char m_aDDNetVersionStr[64];
 	static void ConTeam(IConsole::IResult *pResult, void *pUserData);
@@ -296,8 +324,6 @@ private:
 	static void ConchainRefreshSkins(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainRefreshEventSkins(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 	static void ConchainSpecialDummy(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
-	static void ConchainDummyCopyMoves(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
-	static void ConchainDummyCopyMovesWithHammer(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
 
 	static void ConTuneParam(IConsole::IResult *pResult, void *pUserData);
 	static void ConTuneZone(IConsole::IResult *pResult, void *pUserData);
@@ -361,6 +387,7 @@ public:
 	bool m_SuppressEvents;
 	bool m_NewTick;
 	bool m_NewPredictedTick;
+	bool m_aPredictedHammerHitEvent[NUM_DUMMIES];
 	int m_aFlagDropTick[2];
 
 	enum
@@ -390,6 +417,8 @@ public:
 		const CNetObj_SpectatorInfo *m_pSpectatorInfo;
 		const CNetObj_SpectatorInfo *m_pPrevSpectatorInfo;
 		const CNetObj_SpectatorCount *m_pSpectatorCount;
+		bool m_aSpectatorWatchers[MAX_CLIENTS];
+		int m_NumSpectatorWatchers;
 		int m_NumFlags;
 		const CNetObj_Flag *m_apFlags[CSnapshot::MAX_ITEMS];
 		const CNetObj_Flag *m_apPrevFlags[CSnapshot::MAX_ITEMS];
@@ -669,6 +698,7 @@ public:
 	void OnActivateEditor() override;
 	void OnDummySwap() override;
 	int OnSnapInput(int *pData, bool Dummy, bool Force) override;
+	void PrepareInputForSend(int *pData, int Size, bool Dummy) override;
 	void OnShutdown() override;
 	void OnEnterGame() override;
 	void OnRconType(bool UsernameReq) override;
@@ -715,6 +745,7 @@ public:
 	bool GotWantedSkin7(bool Dummy);
 	void SendInfo(bool Start);
 	void SendDummyInfo(bool Start) override;
+	void SendKill();
 	void SendKill() const;
 	void SendReadyChange7();
 
@@ -729,8 +760,8 @@ public:
 	CNetObj_PlayerInput m_DummyInput;
 	CNetObj_PlayerInput m_HammerInput;
 	unsigned int m_DummyFire;
-	bool m_DeepflyRequested; // Tracks if main player fired to trigger deepfly
-	int m_DeepflyLastMainFire; // Last fire counter of main player
+	bool m_DeepflyRequested;
+	int m_DeepflyLastMainFire;
 	bool m_ReceivedDDNetPlayer;
 	bool m_ReceivedDDNetPlayerFinishTimes;
 	bool m_ReceivedDDNetPlayerFinishTimesMillis;
@@ -741,15 +772,38 @@ public:
 
 	int LastRaceTick() const;
 	int CurrentRaceTime() const;
+	struct SBestInputSettings
+	{
+		int m_Offset;
+		int m_Smoothing;
+		int m_LatencyComp;
+	};
+	int CurrentPing() const;
+	SBestInputSettings BestInputSettings() const;
 
 	bool IsTeamPlay() const { return m_Snap.m_pGameInfoObj && m_Snap.m_pGameInfoObj->m_GameFlags & GAMEFLAG_TEAMS; }
 
-	bool AntiPingPlayers() const { return g_Config.m_ClAntiPing && g_Config.m_ClAntiPingPlayers && !m_Snap.m_SpecInfo.m_Active && Client()->State() != IClient::STATE_DEMOPLAYBACK; }
-	bool AntiPingGrenade() const { return g_Config.m_ClAntiPing && g_Config.m_ClAntiPingGrenade && !m_Snap.m_SpecInfo.m_Active && Client()->State() != IClient::STATE_DEMOPLAYBACK; }
-	bool AntiPingWeapons() const { return g_Config.m_ClAntiPing && g_Config.m_ClAntiPingWeapons && !m_Snap.m_SpecInfo.m_Active && Client()->State() != IClient::STATE_DEMOPLAYBACK; }
-	bool AntiPingGunfire() const { return AntiPingGrenade() && AntiPingWeapons() && g_Config.m_ClAntiPingGunfire; }
+	bool AntiPingPlayers() const { return m_FastPractice.ForcePredictPlayers() || (g_Config.m_ClAntiPing && g_Config.m_ClAntiPingPlayers && !m_Snap.m_SpecInfo.m_Active && Client()->State() != IClient::STATE_DEMOPLAYBACK && (m_aTuning[g_Config.m_ClDummy].m_PlayerCollision || m_aTuning[g_Config.m_ClDummy].m_PlayerHooking)); }
+	bool AntiPingGrenade() const { return m_FastPractice.ForcePredictGrenade() || (g_Config.m_ClAntiPing && g_Config.m_ClAntiPingGrenade && !m_Snap.m_SpecInfo.m_Active && Client()->State() != IClient::STATE_DEMOPLAYBACK); }
+	bool AntiPingWeapons() const { return m_FastPractice.ForcePredictWeapons() || (g_Config.m_ClAntiPing && g_Config.m_ClAntiPingWeapons && !m_Snap.m_SpecInfo.m_Active && Client()->State() != IClient::STATE_DEMOPLAYBACK); }
+	bool AntiPingGunfire() const { return m_FastPractice.ForcePredictGunfire() || (AntiPingGrenade() && AntiPingWeapons() && g_Config.m_ClAntiPingGunfire); }
+	bool OptimizerEnabled() const;
+	bool OptimizerDisableParticles() const;
+	bool OptimizerFpsFogEnabled() const;
+	void OptimizerFpsFogHalfExtents(float &HalfW, float &HalfH) const;
+	bool OptimizerAllowRenderPos(vec2 WorldPos) const;
+	void OptimizerSetDdnetPriorityHigh();
+	void OptimizerSetDiscordPriorityBelowNormal();
 	bool Predict() const;
-	bool PredictDummy() const { return g_Config.m_ClPredictDummy && Client()->DummyConnected() && m_Snap.m_LocalClientId >= 0 && m_aLocalIds[!g_Config.m_ClDummy] >= 0 && !m_aClients[m_aLocalIds[!g_Config.m_ClDummy]].m_Paused; }
+	bool PredictDummy() const
+	{
+		if(m_FastPractice.Enabled())
+		{
+			const int FastPracticeDummyId = m_FastPractice.CurrentPracticeDummyId();
+			return FastPracticeDummyId >= 0 && m_Snap.m_LocalClientId >= 0 && !m_aClients[FastPracticeDummyId].m_Paused;
+		}
+		return g_Config.m_ClPredictDummy && Client()->DummyConnected() && m_Snap.m_LocalClientId >= 0 && m_PredictedDummyId >= 0 && !m_aClients[m_PredictedDummyId].m_Paused;
+	}
 	const CTuningParams *GetTuning(int i) const { return &m_aTuningList[i]; }
 	ColorRGBA GetDDTeamColor(int DDTeam, float Lightness = 0.5f) const;
 	void FormatClientId(int ClientId, char (&aClientId)[16], EClientIdFormat Format) const;
@@ -770,6 +824,7 @@ public:
 
 	void DummyResetInput() override;
 	void Echo(const char *pString) override;
+	void Broadcast(const char *pString) override;
 	bool IsOtherTeam(int ClientId) const;
 	int SwitchStateTeam() const;
 	bool IsLocalCharSuper() const;
@@ -777,6 +832,7 @@ public:
 
 	IMap *Map() override { return m_pMap.get(); }
 	const IMap *Map() const override { return m_pMap.get(); }
+	const char *LocalPlayerSkinName() const override;
 	CNetObjHandler *GetNetObjHandler() override;
 	protocol7::CNetObjHandler *GetNetObjHandler7() override;
 
@@ -785,6 +841,11 @@ public:
 	void LoadParticlesSkin(const char *pPath, bool AsDir = false);
 	void LoadHudSkin(const char *pPath, bool AsDir = false);
 	void LoadExtrasSkin(const char *pPath, bool AsDir = false);
+	void LoadCursorAsset(const char *pPath, bool AsDir = false);
+	void LoadArrowAsset(const char *pPath, bool AsDir = false);
+
+	IGraphics::CTextureHandle CursorTexture() const;
+	IGraphics::CTextureHandle ArrowTexture() const;
 
 	struct SClientGameSkin
 	{
@@ -949,6 +1010,12 @@ public:
 	SClientExtrasSkin m_ExtrasSkin;
 	bool m_ExtrasSkinLoaded = false;
 
+	IGraphics::CTextureHandle m_CursorTextureOverride;
+	bool m_CursorTextureOverrideLoaded = false;
+
+	IGraphics::CTextureHandle m_ArrowTextureOverride;
+	bool m_ArrowTextureOverrideLoaded = false;
+
 	const std::vector<CSnapEntities> &SnapEntities() { return m_vSnapEntities; }
 
 	vec2 GetSmoothPos(int ClientId);
@@ -991,6 +1058,10 @@ private:
 	void DetectStrongHook();
 
 	int m_IsDummySwapping;
+	int m_PredictedDummyId = -1;
+	int m_aAutoTeamLockLastTeam[NUM_DUMMIES];
+	int64_t m_aAutoTeamLockDeadlineTick[NUM_DUMMIES];
+	bool m_aAutoTeamLockPending[NUM_DUMMIES];
 	CCharOrder m_CharOrder;
 	int m_aSwitchStateTeam[NUM_DUMMIES];
 
@@ -1034,11 +1105,16 @@ private:
 	void OnSaveCodeNetMessage(const CNetMsg_Sv_SaveCode *pMsg);
 	void StoreSave(const char *pTeamMembers, const char *pGeneratedCode) const;
 
+	static void ConchainDummyCopyMoves(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+	static void ConchainDummyCopyMovesWithHammer(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+	static void ConchainDummyHammer(IConsole::IResult *pResult, void *pUserData, IConsole::FCommandCallback pfnCallback, void *pCallbackUserData);
+
 public:
 	// TClient
 	int m_SmoothTick = 0;
 	float m_SmoothIntraTick = 0;
 	bool CheckNewInput() override;
+	bool IsSnapTapBlockedByCommunity() const;
 	std::optional<CServerInfo> m_ConnectServerInfo = std::nullopt;
 	void SetConnectInfo(const NETADDR *pAddress) override;
 };

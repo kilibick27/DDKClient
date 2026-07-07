@@ -192,6 +192,8 @@ protected:
 	int m_ScreenHeight;
 	int m_ScreenRefreshRate;
 	float m_ScreenHiDPIScale;
+	float m_ScreenAspectOverride = 0.0f;
+	bool m_ScreenAspectOverrideEnabled = true;
 
 public:
 	enum
@@ -220,7 +222,7 @@ public:
 
 	int ScreenWidth() const { return m_ScreenWidth; }
 	int ScreenHeight() const { return m_ScreenHeight; }
-	float ScreenAspect() const { return (float)ScreenWidth() / (float)ScreenHeight(); }
+	float ScreenAspect() const { return m_ScreenAspectOverrideEnabled && m_ScreenAspectOverride > 0.0f ? m_ScreenAspectOverride : (float)ScreenWidth() / (float)ScreenHeight(); }
 	float ScreenHiDPIScale() const { return m_ScreenHiDPIScale; }
 	int WindowWidth() const { return m_ScreenWidth / m_ScreenHiDPIScale; }
 	int WindowHeight() const { return m_ScreenHeight / m_ScreenHiDPIScale; }
@@ -406,6 +408,32 @@ public:
 		CQuadItem(vec2 Position, vec2 Size) :
 			m_X(Position.x), m_Y(Position.y), m_Width(Size.x), m_Height(Size.y) {}
 	};
+
+	struct SGlowRectRenderInfo
+	{
+		float m_X = 0.0f;
+		float m_Y = 0.0f;
+		float m_Width = 0.0f;
+		float m_Height = 0.0f;
+		float m_GlowRadius = 0.0f;
+		float m_GlowStrength = 1.0f;
+		ColorRGBA m_Color = ColorRGBA(1.0f, 1.0f, 1.0f, 1.0f);
+	};
+	virtual void DrawGlowRect(const SGlowRectRenderInfo &Info) = 0;
+
+	struct SBlurRectRenderInfo
+	{
+		float m_X = 0.0f;
+		float m_Y = 0.0f;
+		float m_Width = 0.0f;
+		float m_Height = 0.0f;
+		float m_Rounding = 0.0f;
+		float m_BlurRadius = 0.0f;
+		float m_BlurStrength = 1.0f;
+		ColorRGBA m_TintColor = ColorRGBA(1.0f, 1.0f, 1.0f, 0.25f);
+	};
+	virtual void DrawBlurRect(const SBlurRectRenderInfo &Info) = 0;
+
 	virtual void QuadsDraw(CQuadItem *pArray, int Num) = 0;
 	virtual void QuadsDrawTL(const CQuadItem *pArray, int Num) = 0;
 
@@ -613,7 +641,8 @@ protected:
 
 public:
 	// TClient
-	virtual void SetForcedAspect(bool Force) = 0;
+	virtual void SetScreenAspectOverrideEnabled(bool Enabled) = 0;
+	virtual void SetForcedAspect(bool Force, bool ApplyCustomAspect = true) = 0;
 };
 
 class IEngineGraphics : public IGraphics

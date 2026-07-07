@@ -10,6 +10,7 @@
 #include <engine/textrender.h>
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -303,6 +304,45 @@ struct SPopupMenuProperties
 class CUi
 {
 public:
+	enum class EUiSoundEvent
+	{
+		HOVER = 0,
+		CLICK,
+		DISABLED_CLICK,
+		CHECK_ON,
+		CHECK_OFF,
+		DROPDOWN_OPEN,
+		DROPDOWN_CLOSE,
+		POPUP_OPEN,
+		POPUP_CLOSE,
+		SCROLL_TICK,
+		SCROLL_TO_TOP,
+		SCROLL_TO_PREVIOUS,
+		SLIDER_TICK,
+		VALUE_CHANGE,
+		ITEM_SWAP,
+		ERROR,
+		SUBMIT,
+	};
+
+	enum class EButtonSoundType
+	{
+		SILENT = 0,
+		DEFAULT,
+		BUTTON,
+		BUTTON_SIDEBAR,
+		TAB_SELECT,
+		TOOLBAR,
+		CHECKBOX,
+		DROPDOWN,
+		DIALOG_OK,
+		DIALOG_CANCEL,
+		DIALOG_DANGEROUS,
+		MENU_OPEN,
+	};
+
+	using FButtonSoundEventCallback = std::function<void(EUiSoundEvent, EButtonSoundType, bool, int, float)>;
+
 	/**
 	 * These enum values are returned by popup menu functions to specify the behavior.
 	 */
@@ -368,6 +408,26 @@ private:
 	const void *m_pActiveItem = nullptr;
 	const void *m_pLastActiveItem = nullptr; // only used internally to track active CLineInput
 	const void *m_pBecomingHotItem = nullptr;
+	struct SButtonSoundTarget
+	{
+		bool m_Valid = false;
+		const void *m_pId = nullptr;
+		CUIRect m_Rect = {0.0f, 0.0f, 0.0f, 0.0f};
+		EButtonSoundType m_SoundType = EButtonSoundType::SILENT;
+
+		void Reset()
+		{
+			m_Valid = false;
+			m_pId = nullptr;
+			m_Rect = {0.0f, 0.0f, 0.0f, 0.0f};
+			m_SoundType = EButtonSoundType::SILENT;
+		}
+
+		bool SameVisibleTarget(const SButtonSoundTarget &Other) const;
+	};
+
+	SButtonSoundTarget m_ButtonSoundHoveredTarget;
+	SButtonSoundTarget m_ButtonSoundBecomingHoveredTarget;
 	CScrollRegion *m_pHotScrollRegion = nullptr;
 	CScrollRegion *m_pBecomingHotScrollRegion = nullptr;
 	bool m_ActiveItemValid = false;
@@ -414,6 +474,13 @@ private:
 	unsigned m_HotkeysPressed = 0;
 
 	CUIRect m_Screen;
+	int m_LastUiScale = -1;
+	int m_LastScreenWidth = 0;
+	int m_LastScreenHeight = 0;
+	float m_LastScreenAspect = 0.0f;
+	bool m_UseGraphicsScreenAspect = true;
+
+	float EffectiveScreenAspect() const;
 
 	std::vector<CUIRect> m_vClips;
 	void UpdateClipping();
@@ -425,6 +492,7 @@ private:
 
 		const SPopupMenuId *m_pId;
 		SPopupMenuProperties m_Props;
+		EButtonSoundType m_SoundType;
 		CUIRect m_Rect;
 		void *m_pContext;
 		FPopupMenuFunction m_pfnFunc;
@@ -436,11 +504,13 @@ private:
 	static CUi::EPopupMenuFunctionResult PopupConfirm(void *pContext, CUIRect View, bool Active);
 	static CUi::EPopupMenuFunctionResult PopupSelection(void *pContext, CUIRect View, bool Active);
 	static CUi::EPopupMenuFunctionResult PopupColorPicker(void *pContext, CUIRect View, bool Active);
+	static CUi::EPopupMenuFunctionResult PopupColorPickerClassic(void *pContext, CUIRect View, bool Active);
 
 	IClient *m_pClient;
 	IGraphics *m_pGraphics;
 	IInput *m_pInput;
 	ITextRender *m_pTextRender;
+	FButtonSoundEventCallback m_pfnButtonSoundEvent;
 
 	std::vector<CUIElement *> m_vpOwnUIElements; // ui elements maintained by CUi class
 	std::vector<CUIElement *> m_vpUIElements;
@@ -492,6 +562,7 @@ public:
 
 	void SetEnabled(bool Enabled) { m_Enabled = Enabled; }
 	bool Enabled() const { return m_Enabled; }
+	void SetUseGraphicsScreenAspect(bool UseGraphicsScreenAspect) { m_UseGraphicsScreenAspect = UseGraphicsScreenAspect; }
 	void Update(vec2 MouseWorldPos = vec2(-1.0f, -1.0f));
 	void DebugRender(float X, float Y);
 
@@ -566,6 +637,10 @@ public:
 	bool ConsumeHotkey(EHotkey Hotkey);
 	void ClearHotkeys() { m_HotkeysPressed = 0; }
 	bool OnInput(const IInput::CEvent &Event);
+	void SetButtonSoundEventCallback(FButtonSoundEventCallback pfnCallback) { m_pfnButtonSoundEvent = pfnCallback; }
+	void ClearButtonSoundEventCallback() { m_pfnButtonSoundEvent = nullptr; }
+	void EmitSoundEvent(EUiSoundEvent Event, EButtonSoundType SoundType = EButtonSoundType::DEFAULT, bool Enabled = true, int Checked = 0, float Pitch = 1.0f);
+	void EmitHoverSound(const void *pId, const CUIRect *pRect, EButtonSoundType SoundType = EButtonSoundType::DEFAULT, bool Enabled = true, int Checked = 0);
 
 	constexpr float ButtonColorMulActive() const { return 0.5f; }
 	constexpr float ButtonColorMulHot() const { return 1.5f; }
@@ -581,7 +656,7 @@ public:
 	const CUIRect *ClipArea() const;
 	bool IsClipped() const { return !m_vClips.empty(); }
 
-	int DoButtonLogic(const void *pId, int Checked, const CUIRect *pRect, unsigned Flags);
+	int DoButtonLogic(const void *pId, int Checked, const CUIRect *pRect, unsigned Flags, EButtonSoundType SoundType = EButtonSoundType::DEFAULT);
 	int DoDraggableButtonLogic(const void *pId, int Checked, const CUIRect *pRect, bool *pClicked, bool *pAbrupted);
 	bool DoDoubleClickLogic(const void *pId);
 	EEditState DoPickerLogic(const void *pId, const CUIRect *pRect, float *pX, float *pY);
@@ -648,10 +723,10 @@ public:
 	 */
 	bool DoEditBox_Search(CLineInput *pLineInput, const CUIRect *pRect, float FontSize, bool HotkeyEnabled);
 
-	int DoButton_Menu(CUIElement &UIElement, const CButtonContainer *pId, const std::function<const char *()> &GetTextLambda, const CUIRect *pRect, const SMenuButtonProperties &Props = {});
+	int DoButton_Menu(CUIElement &UIElement, const CButtonContainer *pId, const std::function<const char *()> &GetTextLambda, const CUIRect *pRect, const SMenuButtonProperties &Props = {}, EButtonSoundType SoundType = EButtonSoundType::BUTTON);
 	int DoButton_FontIcon(CButtonContainer *pButtonContainer, const char *pText, int Checked, const CUIRect *pRect, unsigned Flags, int Corners = IGraphics::CORNER_ALL, bool Enabled = true, std::optional<ColorRGBA> ButtonColor = std::nullopt);
 	// only used for popup menus
-	int DoButton_PopupMenu(CButtonContainer *pButtonContainer, const char *pText, const CUIRect *pRect, float Size, int Align, float Padding = 0.0f, bool TransparentInactive = false, bool Enabled = true, std::optional<ColorRGBA> ButtonColor = std::nullopt);
+	int DoButton_PopupMenu(CButtonContainer *pButtonContainer, const char *pText, const CUIRect *pRect, float Size, int Align, float Padding = 0.0f, bool TransparentInactive = false, bool Enabled = true, std::optional<ColorRGBA> ButtonColor = std::nullopt, EButtonSoundType SoundType = EButtonSoundType::BUTTON);
 
 	// value selector
 	SEditResult<int64_t> DoValueSelectorWithState(const void *pId, const CUIRect *pRect, const char *pLabel, int64_t Current, int64_t Min, int64_t Max, const SValueSelectorProperties &Props = {});
@@ -679,7 +754,7 @@ public:
 	void RenderProgressSpinner(vec2 Center, float OuterRadius, const SProgressSpinnerProperties &Props = {}) const;
 
 	// popup menu
-	void DoPopupMenu(const SPopupMenuId *pId, float X, float Y, float Width, float Height, void *pContext, FPopupMenuFunction pfnFunc, const SPopupMenuProperties &Props = {});
+	void DoPopupMenu(const SPopupMenuId *pId, float X, float Y, float Width, float Height, void *pContext, FPopupMenuFunction pfnFunc, const SPopupMenuProperties &Props = {}, EButtonSoundType SoundType = EButtonSoundType::DEFAULT);
 	void RenderPopupMenus();
 	void ClosePopupMenu(const SPopupMenuId *pId, bool IncludeDescendants = false);
 	void ClosePopupMenus();
@@ -747,6 +822,7 @@ public:
 		float m_Width;
 		float m_AlignmentHeight;
 		bool m_TransparentButtons;
+		bool m_IsDropDown;
 
 		bool m_SpecialFontRenderMode = false; // TClient
 
@@ -768,6 +844,7 @@ public:
 		CUi *m_pUI; // set by CUi when popup is shown
 		EColorPickerMode m_ColorMode = MODE_UNSET;
 		bool m_Alpha = false;
+		bool m_ShowAlphaSlider = true;
 		unsigned int *m_pHslaColor = nullptr; // may be nullptr
 		ColorHSVA m_HsvaColor;
 		ColorRGBA m_RgbaColor;
@@ -788,6 +865,8 @@ public:
 		CUIElement m_UiElement;
 		CButtonContainer m_ButtonContainer;
 		bool m_Init = false;
+		bool m_PopupWasOpen = false;
+		bool m_CloseSoundSuppressed = false;
 	};
 	int DoDropDown(CUIRect *pRect, int CurSelection, const char **pStrs, int Num, SDropDownState &State);
 };

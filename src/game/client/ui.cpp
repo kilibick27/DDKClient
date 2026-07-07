@@ -16,6 +16,7 @@
 
 #include <game/localization.h>
 
+#include <cmath>
 #include <limits>
 
 void CUIElement::Init(CUi *pUI, int RequestedRectCount)
@@ -104,6 +105,40 @@ IGraphics *CUIElementBase::Graphics() const { return ms_pUi->Graphics(); }
 IInput *CUIElementBase::Input() const { return ms_pUi->Input(); }
 ITextRender *CUIElementBase::TextRender() const { return ms_pUi->TextRender(); }
 
+static bool UiRectContains(const CUIRect &Outer, const CUIRect &Inner)
+{
+	constexpr float Tolerance = 0.5f;
+	return Inner.x + Tolerance >= Outer.x &&
+		Inner.y + Tolerance >= Outer.y &&
+		Inner.x + Inner.w <= Outer.x + Outer.w + Tolerance &&
+		Inner.y + Inner.h <= Outer.y + Outer.h + Tolerance;
+}
+
+bool CUi::SButtonSoundTarget::SameVisibleTarget(const SButtonSoundTarget &Other) const
+{
+	if(!m_Valid || !Other.m_Valid || m_SoundType != Other.m_SoundType)
+		return false;
+	if(m_pId == Other.m_pId)
+		return true;
+
+	constexpr float Tolerance = 0.5f;
+	return std::fabs(m_Rect.x - Other.m_Rect.x) <= Tolerance &&
+		std::fabs(m_Rect.y - Other.m_Rect.y) <= Tolerance &&
+		std::fabs(m_Rect.w - Other.m_Rect.w) <= Tolerance &&
+		std::fabs(m_Rect.h - Other.m_Rect.h) <= Tolerance;
+}
+
+float CUi::EffectiveScreenAspect() const
+{
+	if(m_UseGraphicsScreenAspect)
+		return Graphics()->ScreenAspect();
+
+	const int ScreenHeight = Graphics()->ScreenHeight();
+	if(ScreenHeight <= 0)
+		return Graphics()->ScreenAspect();
+	return (float)Graphics()->ScreenWidth() / (float)ScreenHeight;
+}
+
 void CUi::Init(IKernel *pKernel)
 {
 	m_pClient = pKernel->RequestInterface<IClient>();
@@ -182,6 +217,31 @@ void CUi::OnCursorMove(float X, float Y)
 
 void CUi::Update(vec2 MouseWorldPos)
 {
+	const int UiScale = std::clamp(g_Config.m_UiScale, 50, 200);
+	const int ScreenWidth = Graphics()->ScreenWidth();
+	const int ScreenHeight = Graphics()->ScreenHeight();
+	const float ScreenAspect = EffectiveScreenAspect();
+	const bool UiScaleChanged = UiScale != m_LastUiScale;
+	const bool ScreenMetricsChanged = ScreenWidth != m_LastScreenWidth || ScreenHeight != m_LastScreenHeight || absolute(ScreenAspect - m_LastScreenAspect) > 0.0001f;
+	if(UiScaleChanged)
+	{
+		// Changing UI scale changes text pixel size. Reuse the full window-resize
+		// reset path so all text containers get recreated consistently.
+		Client()->OnWindowResize();
+	}
+	else if(ScreenMetricsChanged)
+	{
+		OnElementsReset();
+	}
+
+	if(UiScaleChanged || ScreenMetricsChanged)
+	{
+		m_LastUiScale = UiScale;
+		m_LastScreenWidth = ScreenWidth;
+		m_LastScreenHeight = ScreenHeight;
+		m_LastScreenAspect = ScreenAspect;
+	}
+
 	const vec2 WindowSize = vec2(Graphics()->WindowWidth(), Graphics()->WindowHeight());
 	const CUIRect *pScreen = Screen();
 
@@ -244,6 +304,8 @@ void CUi::Update(vec2 MouseWorldPos)
 	if(m_pActiveItem)
 		m_pHotItem = m_pActiveItem;
 	m_pBecomingHotItem = nullptr;
+	m_ButtonSoundHoveredTarget = m_ButtonSoundBecomingHoveredTarget;
+	m_ButtonSoundBecomingHoveredTarget.Reset();
 	m_pHotScrollRegion = m_pBecomingHotScrollRegion;
 	m_pBecomingHotScrollRegion = nullptr;
 
@@ -444,8 +506,9 @@ float CUi::ButtonColorMul(const void *pId)
 
 const CUIRect *CUi::Screen()
 {
-	m_Screen.h = 600.0f;
-	m_Screen.w = Graphics()->ScreenAspect() * m_Screen.h;
+	const float Scale = std::clamp(g_Config.m_UiScale / 100.0f, 0.5f, 2.0f);
+	m_Screen.h = 600.0f / Scale;
+	m_Screen.w = EffectiveScreenAspect() * m_Screen.h;
 	return &m_Screen;
 }
 
@@ -492,6 +555,48 @@ const CUIRect *CUi::ClipArea() const
 	return &m_vClips.back();
 }
 
+void CUi::EmitSoundEvent(EUiSoundEvent Event, EButtonSoundType SoundType, bool Enabled, int Checked, float Pitch)
+{
+	if(m_pfnButtonSoundEvent == nullptr || SoundType == EButtonSoundType::SILENT)
+		return;
+	m_pfnButtonSoundEvent(Event, SoundType, Enabled, Checked, Pitch);
+}
+
+void CUi::EmitHoverSound(const void *pId, const CUIRect *pRect, EButtonSoundType SoundType, bool Enabled, int Checked)
+{
+	if(m_pfnButtonSoundEvent == nullptr || SoundType == EButtonSoundType::SILENT || !Enabled)
+		return;
+
+	SButtonSoundTarget SoundTarget;
+	SoundTarget.m_Valid = true;
+	SoundTarget.m_pId = pId;
+	SoundTarget.m_Rect = *pRect;
+	SoundTarget.m_SoundType = SoundType;
+
+	const bool PreviousTargetStillHovered =
+		m_ButtonSoundHoveredTarget.m_Valid &&
+		MouseHovered(&m_ButtonSoundHoveredTarget.m_Rect);
+	if(PreviousTargetStillHovered &&
+		!SoundTarget.SameVisibleTarget(m_ButtonSoundHoveredTarget) &&
+		UiRectContains(SoundTarget.m_Rect, m_ButtonSoundHoveredTarget.m_Rect))
+	{
+		return;
+	}
+
+	const bool AnyMouseButtonPressed = MouseButton(0) || MouseButton(1) || MouseButton(2);
+	const bool CanClaimSoundTarget = !m_ButtonSoundBecomingHoveredTarget.m_Valid ||
+		m_ButtonSoundBecomingHoveredTarget.SameVisibleTarget(m_ButtonSoundHoveredTarget);
+	if(!CanClaimSoundTarget)
+		return;
+
+	const bool CanPlayHoverSound = !AnyMouseButtonPressed &&
+		HotItem() != pId &&
+		!SoundTarget.SameVisibleTarget(m_ButtonSoundHoveredTarget);
+	m_ButtonSoundBecomingHoveredTarget = SoundTarget;
+	if(CanPlayHoverSound)
+		EmitSoundEvent(EUiSoundEvent::HOVER, SoundType, true, Checked);
+}
+
 void CUi::UpdateClipping()
 {
 	if(IsClipped())
@@ -507,18 +612,32 @@ void CUi::UpdateClipping()
 	}
 }
 
-int CUi::DoButtonLogic(const void *pId, int Checked, const CUIRect *pRect, const unsigned Flags)
+int CUi::DoButtonLogic(const void *pId, int Checked, const CUIRect *pRect, const unsigned Flags, EButtonSoundType SoundType)
 {
 	int ReturnValue = 0;
 	const bool Inside = MouseHovered(pRect);
+	const bool SoundEnabled = SoundType != EButtonSoundType::SILENT && Flags != BUTTONFLAG_NONE;
 
 	if(CheckActiveItem(pId))
 	{
 		dbg_assert(m_ActiveButtonLogicButton >= 0, "m_ActiveButtonLogicButton invalid");
 		if(!MouseButton(m_ActiveButtonLogicButton))
 		{
-			if(Inside && Checked >= 0)
-				ReturnValue = 1 + m_ActiveButtonLogicButton;
+			if(Inside)
+			{
+				const bool Enabled = Checked >= 0;
+				if(Enabled)
+					ReturnValue = 1 + m_ActiveButtonLogicButton;
+				if(SoundEnabled)
+				{
+					if(!Enabled)
+						EmitSoundEvent(EUiSoundEvent::DISABLED_CLICK, SoundType, false, Checked);
+					else if(SoundType == EButtonSoundType::CHECKBOX)
+						EmitSoundEvent(Checked ? EUiSoundEvent::CHECK_OFF : EUiSoundEvent::CHECK_ON, SoundType, true, Checked);
+					else
+						EmitSoundEvent(EUiSoundEvent::CLICK, SoundType, true, Checked);
+				}
+			}
 			SetActiveItem(nullptr);
 			m_ActiveButtonLogicButton = -1;
 		}
@@ -539,7 +658,11 @@ int CUi::DoButtonLogic(const void *pId, int Checked, const CUIRect *pRect, const
 	}
 
 	if(Inside && NoRelevantButtonsPressed)
+	{
+		if(SoundEnabled)
+			EmitHoverSound(pId, pRect, SoundType, Checked >= 0, Checked);
 		SetHotItem(pId);
+	}
 
 	return ReturnValue;
 }
@@ -593,6 +716,8 @@ int CUi::DoDraggableButtonLogic(const void *pId, int Checked, const CUIRect *pRe
 		{
 			if(MouseButton(i))
 			{
+				if(MouseButtonClicked(i))
+					EmitSoundEvent(EUiSoundEvent::CLICK);
 				SetActiveItem(pId);
 				m_ActiveDraggableButtonLogicButton = i;
 			}
@@ -600,7 +725,10 @@ int CUi::DoDraggableButtonLogic(const void *pId, int Checked, const CUIRect *pRe
 	}
 
 	if(Inside && !MouseButton(0) && !MouseButton(1) && !MouseButton(2))
+	{
+		EmitHoverSound(pId, pRect);
 		SetHotItem(pId);
+	}
 
 	return ReturnValue;
 }
@@ -623,12 +751,16 @@ bool CUi::DoDoubleClickLogic(const void *pId)
 EEditState CUi::DoPickerLogic(const void *pId, const CUIRect *pRect, float *pX, float *pY)
 {
 	if(MouseHovered(pRect))
+	{
+		EmitHoverSound(pId, pRect, EButtonSoundType::TOOLBAR);
 		SetHotItem(pId);
+	}
 
 	EEditState Res = EEditState::EDITING;
 
 	if(HotItem() == pId && MouseButtonClicked(0))
 	{
+		EmitSoundEvent(EUiSoundEvent::CLICK, EButtonSoundType::TOOLBAR);
 		SetActiveItem(pId);
 		if(!m_pLastEditingItem)
 		{
@@ -657,6 +789,8 @@ EEditState CUi::DoPickerLogic(const void *pId, const CUIRect *pRect, float *pX, 
 		*pX = std::clamp(MouseX() - pRect->x, 0.0f, pRect->w);
 	if(pY)
 		*pY = std::clamp(MouseY() - pRect->y, 0.0f, pRect->h);
+	if(Res == EEditState::EDITING && (absolute(MouseDeltaX()) > 0.0f || absolute(MouseDeltaY()) > 0.0f))
+		EmitSoundEvent(EUiSoundEvent::SLIDER_TICK);
 
 	return Res;
 }
@@ -933,6 +1067,8 @@ bool CUi::DoEditBox(CLineInput *pLineInput, const CUIRect *pRect, float FontSize
 	{
 		if(MouseButton(0))
 		{
+			if(MouseButtonClicked(0))
+				EmitSoundEvent(EUiSoundEvent::CLICK);
 			if(!Active)
 				JustGotActive = true;
 			SetActiveItem(pLineInput);
@@ -940,7 +1076,10 @@ bool CUi::DoEditBox(CLineInput *pLineInput, const CUIRect *pRect, float FontSize
 	}
 
 	if(Inside && !MouseButton(0))
+	{
+		EmitHoverSound(pLineInput, pRect);
 		SetHotItem(pLineInput);
+	}
 
 	if(Enabled() && Active && !JustGotActive)
 		pLineInput->Activate(EInputPriority::UI);
@@ -1019,7 +1158,7 @@ bool CUi::DoClearableEditBox(CLineInput *pLineInput, const CUIRect *pRect, float
 	TextRender()->SetRenderFlags(ETextRenderFlags::TEXT_RENDER_FLAG_ONLY_ADVANCE_WIDTH | ETextRenderFlags::TEXT_RENDER_FLAG_NO_X_BEARING | ETextRenderFlags::TEXT_RENDER_FLAG_NO_Y_BEARING | ETextRenderFlags::TEXT_RENDER_FLAG_NO_OVERSIZE);
 	DoLabel(&ClearButton, "×", ClearButton.h * CUi::ms_FontmodHeight * 0.8f, TEXTALIGN_MC);
 	TextRender()->SetRenderFlags(0);
-	if(DoButtonLogic(pLineInput->GetClearButtonId(), 0, &ClearButton, BUTTONFLAG_LEFT))
+	if(DoButtonLogic(pLineInput->GetClearButtonId(), 0, &ClearButton, BUTTONFLAG_LEFT, EButtonSoundType::TOOLBAR))
 	{
 		pLineInput->Clear();
 		SetActiveItem(pLineInput);
@@ -1048,8 +1187,26 @@ bool CUi::DoEditBox_Search(CLineInput *pLineInput, const CUIRect *pRect, float F
 	return DoClearableEditBox(pLineInput, &QuickSearch, FontSize);
 }
 
-int CUi::DoButton_Menu(CUIElement &UIElement, const CButtonContainer *pId, const std::function<const char *()> &GetTextLambda, const CUIRect *pRect, const SMenuButtonProperties &Props)
+int CUi::DoButton_Menu(CUIElement &UIElement, const CButtonContainer *pId, const std::function<const char *()> &GetTextLambda, const CUIRect *pRect, const SMenuButtonProperties &Props, EButtonSoundType SoundType)
 {
+	if(!UIElement.AreRectsInit())
+	{
+		bool IsRegistered = false;
+		for(const CUIElement *pElement : m_vpUIElements)
+		{
+			if(pElement == &UIElement)
+			{
+				IsRegistered = true;
+				break;
+			}
+		}
+		if(!IsRegistered)
+		{
+			UIElement.m_pUI = this;
+			AddUIElement(&UIElement);
+		}
+	}
+
 	CUIRect Text = *pRect, DropDownIcon;
 	Text.HMargin(pRect->h >= 20.0f ? 2.0f : 1.0f, &Text);
 	Text.HMargin((Text.h * Props.m_FontFactor) / 2.0f, &Text);
@@ -1147,7 +1304,7 @@ int CUi::DoButton_Menu(CUIElement &UIElement, const CButtonContainer *pId, const
 	ColorRGBA ColorTextOutline(TextRender()->DefaultTextOutlineColor());
 	if(UIElement.Rect(0)->m_UITextContainer.Valid())
 		TextRender()->RenderTextContainer(UIElement.Rect(0)->m_UITextContainer, ColorText, ColorTextOutline);
-	return DoButtonLogic(pId, Props.m_Checked, pRect, Props.m_Flags);
+	return DoButtonLogic(pId, Props.m_Checked, pRect, Props.m_Flags, SoundType);
 }
 
 int CUi::DoButton_FontIcon(CButtonContainer *pButtonContainer, const char *pText, int Checked, const CUIRect *pRect, const unsigned Flags, int Corners, bool Enabled, const std::optional<ColorRGBA> ButtonColor)
@@ -1175,10 +1332,10 @@ int CUi::DoButton_FontIcon(CButtonContainer *pButtonContainer, const char *pText
 	TextRender()->SetRenderFlags(0);
 	TextRender()->SetFontPreset(EFontPreset::DEFAULT_FONT);
 
-	return DoButtonLogic(pButtonContainer, Checked, pRect, Flags);
+	return DoButtonLogic(pButtonContainer, Checked, pRect, Flags, EButtonSoundType::TOOLBAR);
 }
 
-int CUi::DoButton_PopupMenu(CButtonContainer *pButtonContainer, const char *pText, const CUIRect *pRect, float Size, int Align, float Padding, bool TransparentInactive, bool Enabled, const std::optional<ColorRGBA> ButtonColor)
+int CUi::DoButton_PopupMenu(CButtonContainer *pButtonContainer, const char *pText, const CUIRect *pRect, float Size, int Align, float Padding, bool TransparentInactive, bool Enabled, const std::optional<ColorRGBA> ButtonColor, EButtonSoundType SoundType)
 {
 	if(!TransparentInactive || CheckActiveItem(pButtonContainer) || HotItem() == pButtonContainer)
 		pRect->Draw(ButtonColor.value_or(Enabled ? ColorRGBA(1.0f, 1.0f, 1.0f, 0.5f * ButtonColorMul(pButtonContainer)) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.4f)), IGraphics::CORNER_ALL, 3.0f);
@@ -1187,7 +1344,8 @@ int CUi::DoButton_PopupMenu(CButtonContainer *pButtonContainer, const char *pTex
 	pRect->Margin(Padding, &Label);
 	DoLabel(&Label, pText, Size, Align);
 
-	return Enabled ? DoButtonLogic(pButtonContainer, 0, pRect, BUTTONFLAG_LEFT) : 0;
+	const int Result = DoButtonLogic(pButtonContainer, Enabled ? 0 : -1, pRect, BUTTONFLAG_LEFT, SoundType);
+	return Enabled ? Result : 0;
 }
 
 int64_t CUi::DoValueSelector(const void *pId, const CUIRect *pRect, const char *pLabel, int64_t Current, int64_t Min, int64_t Max, const SValueSelectorProperties &Props)
@@ -1198,6 +1356,7 @@ int64_t CUi::DoValueSelector(const void *pId, const CUIRect *pRect, const char *
 SEditResult<int64_t> CUi::DoValueSelectorWithState(const void *pId, const CUIRect *pRect, const char *pLabel, int64_t Current, int64_t Min, int64_t Max, const SValueSelectorProperties &Props)
 {
 	// logic
+	const int64_t OriginalCurrent = Current;
 	const bool Inside = MouseInside(pRect);
 	const int Base = Props.m_IsHex ? 16 : 10;
 
@@ -1266,6 +1425,8 @@ SEditResult<int64_t> CUi::DoValueSelectorWithState(const void *pId, const CUIRec
 		{
 			if(MouseButton(0))
 			{
+				if(MouseButtonClicked(0))
+					EmitSoundEvent(EUiSoundEvent::CLICK);
 				m_ActiveValueSelectorState.m_Button = 0;
 				m_ActiveValueSelectorState.m_DidScroll = false;
 				m_ActiveValueSelectorState.m_ScrollValue = 0.0f;
@@ -1275,6 +1436,8 @@ SEditResult<int64_t> CUi::DoValueSelectorWithState(const void *pId, const CUIRec
 			}
 			else if(MouseButton(1))
 			{
+				if(MouseButtonClicked(1))
+					EmitSoundEvent(EUiSoundEvent::CLICK);
 				m_ActiveValueSelectorState.m_Button = 1;
 				SetActiveItem(pId);
 			}
@@ -1301,7 +1464,10 @@ SEditResult<int64_t> CUi::DoValueSelectorWithState(const void *pId, const CUIRec
 	}
 
 	if(Inside && !MouseButton(0) && !MouseButton(1))
+	{
+		EmitHoverSound(pId, pRect);
 		SetHotItem(pId);
+	}
 
 	EEditState State = EEditState::NONE;
 	if(m_pLastEditingItem == pId)
@@ -1318,6 +1484,9 @@ SEditResult<int64_t> CUi::DoValueSelectorWithState(const void *pId, const CUIRec
 		State = EEditState::END;
 		m_pLastEditingItem = nullptr;
 	}
+
+	if(Current != OriginalCurrent)
+		EmitSoundEvent(EUiSoundEvent::SLIDER_TICK, EButtonSoundType::DEFAULT);
 
 	return SEditResult<int64_t>{State, Current};
 }
@@ -1358,6 +1527,8 @@ float CUi::DoScrollbarV(const void *pId, const CUIRect *pRect, float Current)
 		{
 			if(MouseButton(0))
 			{
+				if(MouseButtonClicked(0))
+					EmitSoundEvent(EUiSoundEvent::CLICK);
 				SetActiveItem(pId);
 				m_ActiveScrollbarOffset = MouseY() - Handle.y;
 				Grabbed = true;
@@ -1365,6 +1536,7 @@ float CUi::DoScrollbarV(const void *pId, const CUIRect *pRect, float Current)
 		}
 		else if(MouseButtonClicked(0))
 		{
+			EmitSoundEvent(EUiSoundEvent::CLICK);
 			SetActiveItem(pId);
 			m_ActiveScrollbarOffset = Handle.h / 2.0f;
 			Grabbed = true;
@@ -1373,6 +1545,7 @@ float CUi::DoScrollbarV(const void *pId, const CUIRect *pRect, float Current)
 
 	if(InsideRail && !MouseButton(0))
 	{
+		EmitHoverSound(pId, &Rail);
 		SetHotItem(pId);
 	}
 
@@ -1440,6 +1613,8 @@ float CUi::DoScrollbarH(const void *pId, const CUIRect *pRect, float Current, co
 		{
 			if(MouseButton(0))
 			{
+				if(MouseButtonClicked(0))
+					EmitSoundEvent(EUiSoundEvent::CLICK);
 				SetActiveItem(pId);
 				m_pLastActiveScrollbar = pId;
 				m_ActiveScrollbarOffset = MouseX() - Handle.x;
@@ -1448,6 +1623,7 @@ float CUi::DoScrollbarH(const void *pId, const CUIRect *pRect, float Current, co
 		}
 		else if(MouseButtonClicked(0))
 		{
+			EmitSoundEvent(EUiSoundEvent::CLICK);
 			SetActiveItem(pId);
 			m_pLastActiveScrollbar = pId;
 			m_ActiveScrollbarOffset = Handle.w / 2.0f;
@@ -1463,6 +1639,7 @@ float CUi::DoScrollbarH(const void *pId, const CUIRect *pRect, float Current, co
 
 	if(InsideRail && !MouseButton(0))
 	{
+		EmitHoverSound(pId, &Rail);
 		SetHotItem(pId);
 	}
 
@@ -1564,6 +1741,11 @@ bool CUi::DoScrollbarOption(const void *pId, int *pOption, const CUIRect *pRect,
 
 	if(*pOption != Value)
 	{
+		const int PitchValue = Infinite && Value == 0 ? Max : Value;
+		const float RelativeValue = Max > Min ? std::clamp((PitchValue - Min) / (float)(Max - Min), 0.0f, 1.0f) : 0.5f;
+		const float RawPitch = 0.45f + RelativeValue * 0.73f;
+		const float Pitch = 1.0f + (RawPitch - 1.0f) / 3.0f;
+		EmitSoundEvent(EUiSoundEvent::SLIDER_TICK, EButtonSoundType::DEFAULT, true, 0, Pitch);
 		*pOption = Value;
 		return true;
 	}
@@ -1673,8 +1855,9 @@ void CUi::RenderProgressSpinner(vec2 Center, float OuterRadius, const SProgressS
 	Graphics()->QuadsEnd();
 }
 
-void CUi::DoPopupMenu(const SPopupMenuId *pId, float X, float Y, float Width, float Height, void *pContext, FPopupMenuFunction pfnFunc, const SPopupMenuProperties &Props)
+void CUi::DoPopupMenu(const SPopupMenuId *pId, float X, float Y, float Width, float Height, void *pContext, FPopupMenuFunction pfnFunc, const SPopupMenuProperties &Props, EButtonSoundType SoundType)
 {
+	const bool WasOpen = IsPopupOpen(pId);
 	constexpr float Margin = SPopupMenu::POPUP_BORDER + SPopupMenu::POPUP_MARGIN;
 	if(X + Width > Screen()->w - Margin)
 		X = maximum<float>(X - Width, Margin);
@@ -1685,12 +1868,15 @@ void CUi::DoPopupMenu(const SPopupMenuId *pId, float X, float Y, float Width, fl
 	SPopupMenu *pNewMenu = &m_vPopupMenus.back();
 	pNewMenu->m_pId = pId;
 	pNewMenu->m_Props = Props;
+	pNewMenu->m_SoundType = SoundType;
 	pNewMenu->m_Rect.x = X;
 	pNewMenu->m_Rect.y = Y;
 	pNewMenu->m_Rect.w = Width;
 	pNewMenu->m_Rect.h = Height;
 	pNewMenu->m_pContext = pContext;
 	pNewMenu->m_pfnFunc = pfnFunc;
+	if(!WasOpen)
+		EmitSoundEvent(EUiSoundEvent::POPUP_OPEN, SoundType);
 }
 
 void CUi::RenderPopupMenus()
@@ -1752,10 +1938,12 @@ void CUi::ClosePopupMenu(const SPopupMenuId *pId, bool IncludeDescendants)
 	auto PopupMenuToClose = std::find_if(m_vPopupMenus.begin(), m_vPopupMenus.end(), [pId](const SPopupMenu PopupMenu) { return PopupMenu.m_pId == pId; });
 	if(PopupMenuToClose != m_vPopupMenus.end())
 	{
+		const EButtonSoundType SoundType = PopupMenuToClose->m_SoundType;
 		if(IncludeDescendants)
 			m_vPopupMenus.erase(PopupMenuToClose, m_vPopupMenus.end());
 		else
 			m_vPopupMenus.erase(PopupMenuToClose);
+		EmitSoundEvent(EUiSoundEvent::POPUP_CLOSE, SoundType);
 		SetActiveItem(nullptr);
 		if(m_pfnPopupMenuClosedCallback)
 			m_pfnPopupMenuClosedCallback();
@@ -1767,7 +1955,9 @@ void CUi::ClosePopupMenus()
 	if(m_vPopupMenus.empty())
 		return;
 
+	const EButtonSoundType SoundType = m_vPopupMenus.back().m_SoundType;
 	m_vPopupMenus.clear();
+	EmitSoundEvent(EUiSoundEvent::POPUP_CLOSE, SoundType);
 	SetActiveItem(nullptr);
 	if(m_pfnPopupMenuClosedCallback)
 		m_pfnPopupMenuClosedCallback();
@@ -1823,7 +2013,7 @@ void CUi::ShowPopupMessage(float X, float Y, SMessagePopupContext *pContext)
 	TextSizeProps.m_pHeight = &TextHeight;
 	TextRender()->TextWidth(SMessagePopupContext::POPUP_FONT_SIZE, pContext->m_aMessage, -1, TextWidth, 0, TextSizeProps);
 	pContext->m_pUI = this;
-	DoPopupMenu(pContext, X, Y, TextWidth + 10.0f, TextHeight + 10.0f, pContext, PopupMessage);
+	DoPopupMenu(pContext, X, Y, TextWidth + 10.0f, TextHeight + 10.0f, pContext, PopupMessage, {}, EButtonSoundType::DIALOG_OK);
 }
 
 CUi::SConfirmPopupContext::SConfirmPopupContext()
@@ -1852,7 +2042,7 @@ void CUi::ShowPopupConfirm(float X, float Y, SConfirmPopupContext *pContext)
 	const float PopupHeight = TextHeight + SConfirmPopupContext::POPUP_BUTTON_HEIGHT + SConfirmPopupContext::POPUP_BUTTON_SPACING + 10.0f;
 	pContext->m_pUI = this;
 	pContext->m_Result = SConfirmPopupContext::UNSET;
-	DoPopupMenu(pContext, X, Y, TextWidth + 10.0f, PopupHeight, pContext, PopupConfirm);
+	DoPopupMenu(pContext, X, Y, TextWidth + 10.0f, PopupHeight, pContext, PopupConfirm, {}, EButtonSoundType::DIALOG_OK);
 }
 
 CUi::EPopupMenuFunctionResult CUi::PopupConfirm(void *pContext, CUIRect View, bool Active)
@@ -1866,14 +2056,18 @@ CUi::EPopupMenuFunctionResult CUi::PopupConfirm(void *pContext, CUIRect View, bo
 
 	pUI->TextRender()->Text(Label.x, Label.y, SConfirmPopupContext::POPUP_FONT_SIZE, pConfirmPopup->m_aMessage, Label.w);
 
-	if(pUI->DoButton_PopupMenu(&pConfirmPopup->m_CancelButton, pConfirmPopup->m_aNegativeButtonLabel, &CancelButton, SConfirmPopupContext::POPUP_FONT_SIZE, TEXTALIGN_MC))
+	if(pUI->DoButton_PopupMenu(&pConfirmPopup->m_CancelButton, pConfirmPopup->m_aNegativeButtonLabel, &CancelButton, SConfirmPopupContext::POPUP_FONT_SIZE, TEXTALIGN_MC, 0.0f, false, true, std::nullopt, EButtonSoundType::DIALOG_CANCEL))
 	{
 		pConfirmPopup->m_Result = SConfirmPopupContext::CANCELED;
 		return CUi::POPUP_CLOSE_CURRENT;
 	}
 
-	if(pUI->DoButton_PopupMenu(&pConfirmPopup->m_ConfirmButton, pConfirmPopup->m_aPositiveButtonLabel, &ConfirmButton, SConfirmPopupContext::POPUP_FONT_SIZE, TEXTALIGN_MC) || (Active && pUI->ConsumeHotkey(HOTKEY_ENTER)))
+	const bool ConfirmClicked = pUI->DoButton_PopupMenu(&pConfirmPopup->m_ConfirmButton, pConfirmPopup->m_aPositiveButtonLabel, &ConfirmButton, SConfirmPopupContext::POPUP_FONT_SIZE, TEXTALIGN_MC, 0.0f, false, true, std::nullopt, EButtonSoundType::DIALOG_OK);
+	const bool ConfirmSubmitted = Active && pUI->ConsumeHotkey(HOTKEY_ENTER);
+	if(ConfirmClicked || ConfirmSubmitted)
 	{
+		if(ConfirmSubmitted)
+			pUI->EmitSoundEvent(EUiSoundEvent::SUBMIT, EButtonSoundType::DIALOG_OK);
 		pConfirmPopup->m_Result = SConfirmPopupContext::CONFIRMED;
 		return CUi::POPUP_CLOSE_CURRENT;
 	}
@@ -1901,6 +2095,7 @@ void CUi::SSelectionPopupContext::Reset()
 	m_Width = 300.0f + (SPopupMenu::POPUP_BORDER + SPopupMenu::POPUP_MARGIN) * 2;
 	m_AlignmentHeight = -1.0f;
 	m_TransparentButtons = false;
+	m_IsDropDown = false;
 }
 
 CUi::EPopupMenuFunctionResult CUi::PopupSelection(void *pContext, CUIRect View, bool Active)
@@ -1986,7 +2181,7 @@ void CUi::ShowPopupSelection(float X, float Y, SSelectionPopupContext *pContext)
 			pContext->m_Props.m_Corners = IGraphics::CORNER_B;
 		}
 	}
-	DoPopupMenu(pContext, X, Y, pContext->m_Width, PopupHeight, pContext, PopupSelection, pContext->m_Props);
+	DoPopupMenu(pContext, X, Y, pContext->m_Width, PopupHeight, pContext, PopupSelection, pContext->m_Props, pContext->m_IsDropDown ? EButtonSoundType::SILENT : EButtonSoundType::DEFAULT);
 }
 
 int CUi::DoDropDown(CUIRect *pRect, int CurSelection, const char **pStrs, int Num, SDropDownState &State)
@@ -1996,6 +2191,7 @@ int CUi::DoDropDown(CUIRect *pRect, int CurSelection, const char **pStrs, int Nu
 		State.m_UiElement.Init(this, -1);
 		State.m_Init = true;
 	}
+	const bool WasOpen = IsPopupOpen(&State.m_SelectionPopupContext);
 
 	const auto LabelFunc = [CurSelection, pStrs]() {
 		return CurSelection > -1 ? pStrs[CurSelection] : "";
@@ -2007,9 +2203,10 @@ int CUi::DoDropDown(CUIRect *pRect, int CurSelection, const char **pStrs, int Nu
 	Props.m_ShowDropDownIcon = true;
 	if(IsPopupOpen(&State.m_SelectionPopupContext))
 		Props.m_Corners = IGraphics::CORNER_ALL & (~State.m_SelectionPopupContext.m_Props.m_Corners);
-	if(DoButton_Menu(State.m_UiElement, &State.m_ButtonContainer, LabelFunc, pRect, Props))
+	if(DoButton_Menu(State.m_UiElement, &State.m_ButtonContainer, LabelFunc, pRect, Props, EButtonSoundType::DROPDOWN))
 	{
 		State.m_SelectionPopupContext.Reset();
+		State.m_CloseSoundSuppressed = false;
 		State.m_SelectionPopupContext.m_Props.m_BorderColor = ColorRGBA(0.7f, 0.7f, 0.7f, 0.9f);
 		State.m_SelectionPopupContext.m_Props.m_BackgroundColor = ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f);
 		for(int i = 0; i < Num; ++i)
@@ -2020,24 +2217,47 @@ int CUi::DoDropDown(CUIRect *pRect, int CurSelection, const char **pStrs, int Nu
 		State.m_SelectionPopupContext.m_Width = pRect->w;
 		State.m_SelectionPopupContext.m_AlignmentHeight = pRect->h;
 		State.m_SelectionPopupContext.m_TransparentButtons = true;
+		State.m_SelectionPopupContext.m_IsDropDown = true;
 		ShowPopupSelection(pRect->x, pRect->y, &State.m_SelectionPopupContext);
 	}
 
 	if(State.m_SelectionPopupContext.m_SelectionIndex >= 0)
 	{
 		const int NewSelection = State.m_SelectionPopupContext.m_SelectionIndex;
+		State.m_CloseSoundSuppressed = true;
+		State.m_PopupWasOpen = false;
 		State.m_SelectionPopupContext.Reset();
 		return NewSelection;
 	}
 
+	const bool IsOpen = IsPopupOpen(&State.m_SelectionPopupContext);
+	if((WasOpen || State.m_PopupWasOpen) && !IsOpen)
+	{
+		if(!State.m_CloseSoundSuppressed)
+			EmitSoundEvent(EUiSoundEvent::DROPDOWN_CLOSE, EButtonSoundType::DROPDOWN);
+		State.m_CloseSoundSuppressed = false;
+	}
+	State.m_PopupWasOpen = IsOpen;
+
 	return CurSelection;
 }
 
-CUi::EPopupMenuFunctionResult CUi::PopupColorPicker(void *pContext, CUIRect View, bool Active)
+CUi::EPopupMenuFunctionResult CUi::PopupColorPickerClassic(void *pContext, CUIRect View, bool Active)
 {
 	SColorPickerPopupContext *pColorPicker = static_cast<SColorPickerPopupContext *>(pContext);
 	CUi *pUI = pColorPicker->m_pUI;
 	pColorPicker->m_State = EEditState::NONE;
+
+	if(Active && pUI->ConsumeHotkey(HOTKEY_ESCAPE))
+	{
+		pUI->DisableMouseLock();
+		pUI->SetActiveItem(nullptr);
+		pUI->m_ActiveValueSelectorState.m_Button = -1;
+		pUI->m_ActiveValueSelectorState.m_DidScroll = false;
+		pUI->m_ActiveValueSelectorState.m_ScrollValue = 0.0f;
+		pUI->m_ActiveValueSelectorState.m_pLastTextId = nullptr;
+		return POPUP_CLOSE_CURRENT;
+	}
 
 	CUIRect ColorsArea, HueArea, BottomArea, ModeButtonArea, HueRect, SatRect, ValueRect, HexRect, AlphaRect;
 
@@ -2299,7 +2519,356 @@ CUi::EPopupMenuFunctionResult CUi::PopupColorPicker(void *pContext, CUIRect View
 		CUIRect ModeButton;
 		ModeButtonArea.VSplitLeft(HsvValueWidth, &ModeButton, &ModeButtonArea);
 		ModeButtonArea.VSplitLeft(ValuePadding, nullptr, &ModeButtonArea);
-		if(pUI->DoButton_PopupMenu(&pColorPicker->m_aModeButtons[(int)Mode], PICKER_MODE_LABELS[Mode], &ModeButton, 10.0f, TEXTALIGN_MC, 2.0f, false, pColorPicker->m_ColorMode != Mode))
+		if(pUI->DoButton_PopupMenu(&pColorPicker->m_aModeButtons[(int)Mode], PICKER_MODE_LABELS[(int)Mode], &ModeButton, 10.0f, TEXTALIGN_MC, 2.0f, false, pColorPicker->m_ColorMode != Mode))
+		{
+			pColorPicker->m_ColorMode = Mode;
+		}
+	}
+
+	return CUi::POPUP_KEEP_OPEN;
+}
+
+CUi::EPopupMenuFunctionResult CUi::PopupColorPicker(void *pContext, CUIRect View, bool Active)
+{
+	SColorPickerPopupContext *pColorPicker = static_cast<SColorPickerPopupContext *>(pContext);
+	CUi *pUI = pColorPicker->m_pUI;
+	pColorPicker->m_State = EEditState::NONE;
+
+	if(Active && pUI->ConsumeHotkey(HOTKEY_ESCAPE))
+	{
+		pUI->DisableMouseLock();
+		pUI->SetActiveItem(nullptr);
+		pUI->m_ActiveValueSelectorState.m_Button = -1;
+		pUI->m_ActiveValueSelectorState.m_DidScroll = false;
+		pUI->m_ActiveValueSelectorState.m_ScrollValue = 0.0f;
+		pUI->m_ActiveValueSelectorState.m_pLastTextId = nullptr;
+		return POPUP_CLOSE_CURRENT;
+	}
+
+	ColorHSVA PickerColorHSV = pColorPicker->m_HsvaColor;
+	ColorRGBA PickerColorRGB = pColorPicker->m_RgbaColor;
+	ColorHSLA PickerColorHSL = pColorPicker->m_HslaColor;
+
+	// Layout
+	constexpr float WheelSize = 160.0f;
+	constexpr float SliderH = 12.0f;
+	constexpr float SliderRound = 4.0f;
+	constexpr float FieldH = 18.0f;
+	constexpr float Pad = 4.0f;
+	constexpr float ValuePadding = 4.0f;
+
+	CUIRect WheelArea, ValueSliderRect, AlphaSliderRect, BottomArea, HueRect, SatRect, ValueRect, HexRect, AlphaRect, ModeButtonArea;
+
+	View.HSplitTop(WheelSize, &WheelArea, &BottomArea);
+	BottomArea.HSplitTop(Pad, nullptr, &BottomArea);
+
+	// Value (brightness) slider
+	BottomArea.HSplitTop(SliderH, &ValueSliderRect, &BottomArea);
+	BottomArea.HSplitTop(Pad, nullptr, &BottomArea);
+
+	// Alpha slider (optional)
+	if(pColorPicker->m_Alpha && pColorPicker->m_ShowAlphaSlider)
+	{
+		BottomArea.HSplitTop(SliderH, &AlphaSliderRect, &BottomArea);
+		BottomArea.HSplitTop(Pad, nullptr, &BottomArea);
+	}
+
+	// Numeric fields row
+	BottomArea.HSplitTop(FieldH, &HueRect, &BottomArea);
+	BottomArea.HSplitTop(Pad, nullptr, &BottomArea);
+	const float FieldW = (HueRect.w - ValuePadding * 2) / 3.0f;
+	HueRect.VSplitLeft(FieldW, &HueRect, &SatRect);
+	SatRect.VSplitLeft(ValuePadding, nullptr, &SatRect);
+	SatRect.VSplitLeft(FieldW, &SatRect, &ValueRect);
+	ValueRect.VSplitLeft(ValuePadding, nullptr, &ValueRect);
+
+	// Hex + alpha field row
+	BottomArea.HSplitTop(FieldH, &HexRect, &BottomArea);
+	BottomArea.HSplitTop(Pad, nullptr, &BottomArea);
+	if(pColorPicker->m_Alpha)
+	{
+		const float HexW = FieldW * 2 + ValuePadding;
+		HexRect.VSplitLeft(HexW, &HexRect, &AlphaRect);
+		AlphaRect.VSplitLeft(ValuePadding, nullptr, &AlphaRect);
+	}
+
+	// Mode buttons row
+	BottomArea.HSplitTop(FieldH, &ModeButtonArea, &BottomArea);
+
+	// --- Hue Wheel ---
+	const float CenterX = WheelArea.x + WheelArea.w / 2.0f;
+	const float CenterY = WheelArea.y + WheelArea.h / 2.0f;
+	const float WheelRadius = WheelSize / 2.0f - 2.0f;
+	const float InnerRadius = 0.0f;
+	constexpr int WheelSegments = 64;
+	const float SegAngle = 2.0f * pi / WheelSegments;
+
+	pUI->Graphics()->TextureClear();
+	pUI->Graphics()->QuadsBegin();
+
+	for(int i = 0; i < WheelSegments; i++)
+	{
+		const float A0 = i * SegAngle;
+		const float A1 = (i + 1) * SegAngle;
+		const float Hue0 = (float)i / WheelSegments;
+		const float Hue1 = (float)(i + 1) / WheelSegments;
+
+		const ColorRGBA OuterColor0 = color_cast<ColorRGBA>(ColorHSVA(Hue0, 1.0f, PickerColorHSV.z, 1.0f));
+		const ColorRGBA OuterColor1 = color_cast<ColorRGBA>(ColorHSVA(Hue1, 1.0f, PickerColorHSV.z, 1.0f));
+		const ColorRGBA InnerColor = ColorRGBA(PickerColorHSV.z, PickerColorHSV.z, PickerColorHSV.z, 1.0f);
+
+		// Outer ring quad (two triangles via freeform: center->innerA->outerA / center->outerA->outerB + innerB)
+		// Use two freeform items per segment to make a trapezoid
+		const float Ox0 = CenterX + std::cos(A0) * WheelRadius;
+		const float Oy0 = CenterY + std::sin(A0) * WheelRadius;
+		const float Ox1 = CenterX + std::cos(A1) * WheelRadius;
+		const float Oy1 = CenterY + std::sin(A1) * WheelRadius;
+		const float Ix0 = CenterX + std::cos(A0) * InnerRadius;
+		const float Iy0 = CenterY + std::sin(A0) * InnerRadius;
+		const float Ix1 = CenterX + std::cos(A1) * InnerRadius;
+		const float Iy1 = CenterY + std::sin(A1) * InnerRadius;
+
+		// Triangle: Inner0, Outer0, Outer1
+		IGraphics::CColorVertex aVerts0[4] = {
+			IGraphics::CColorVertex(0, InnerColor),
+			IGraphics::CColorVertex(1, OuterColor0),
+			IGraphics::CColorVertex(2, InnerColor),
+			IGraphics::CColorVertex(3, OuterColor1),
+		};
+		pUI->Graphics()->SetColorVertex(aVerts0, 4);
+		IGraphics::CFreeformItem Trapezoid(Ix0, Iy0, Ox0, Oy0, Ix1, Iy1, Ox1, Oy1);
+		pUI->Graphics()->QuadsDrawFreeform(&Trapezoid, 1);
+	}
+
+	pUI->Graphics()->QuadsEnd();
+
+	// Dark overlay for low value (brightness)
+	pUI->Graphics()->TextureClear();
+	pUI->Graphics()->QuadsBegin();
+	pUI->Graphics()->SetColor(0.0f, 0.0f, 0.0f, 1.0f - PickerColorHSV.z);
+	pUI->Graphics()->DrawCircle(CenterX, CenterY, WheelRadius, WheelSegments);
+	pUI->Graphics()->QuadsEnd();
+
+	// --- Wheel Picker Logic ---
+	// Use m_HuePickerId as the wheel interactive area (full bounding rect)
+	float WheelPickX, WheelPickY;
+	EEditState WheelPickerRes = pUI->DoPickerLogic(&pColorPicker->m_HuePickerId, &WheelArea, &WheelPickX, &WheelPickY);
+	if(WheelPickerRes != EEditState::NONE)
+	{
+		const float Dx = WheelPickX - WheelArea.w / 2.0f;
+		const float Dy = WheelPickY - WheelArea.h / 2.0f;
+		const float Dist = std::sqrt(Dx * Dx + Dy * Dy);
+		float PickedHue = std::atan2(Dy, Dx) / (2.0f * pi);
+		if(PickedHue < 0.0f)
+			PickedHue += 1.0f;
+		const float PickedSat = std::clamp(Dist / WheelRadius, 0.0f, 1.0f);
+		PickerColorHSV.x = PickedHue;
+		PickerColorHSV.y = PickedSat;
+		PickerColorHSL = color_cast<ColorHSLA>(PickerColorHSV);
+		PickerColorRGB = color_cast<ColorRGBA>(PickerColorHSL);
+		pColorPicker->m_State = WheelPickerRes;
+	}
+
+	// --- Wheel Marker ---
+	{
+		const float MarkerAngle = PickerColorHSV.x * 2.0f * pi;
+		const float MarkerDist = PickerColorHSV.y * WheelRadius;
+		const float MarkerX = CenterX + std::cos(MarkerAngle) * MarkerDist;
+		const float MarkerY = CenterY + std::sin(MarkerAngle) * MarkerDist;
+
+		pUI->Graphics()->TextureClear();
+		pUI->Graphics()->QuadsBegin();
+		pUI->Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+		pUI->Graphics()->DrawCircle(MarkerX, MarkerY, 6.0f, 32);
+		pUI->Graphics()->SetColor(0.0f, 0.0f, 0.0f, 1.0f);
+		pUI->Graphics()->DrawCircle(MarkerX, MarkerY, 5.0f, 32);
+		const ColorRGBA WheelMarkerColor = color_cast<ColorRGBA>(ColorHSVA(PickerColorHSV.x, PickerColorHSV.y, PickerColorHSV.z, 1.0f));
+		pUI->Graphics()->SetColor(WheelMarkerColor);
+		pUI->Graphics()->DrawCircle(MarkerX, MarkerY, 4.0f, 32);
+		pUI->Graphics()->QuadsEnd();
+	}
+
+	// --- Value (Brightness) Slider ---
+	{
+		const ColorRGBA SliderColorL = ColorRGBA(0.0f, 0.0f, 0.0f, 1.0f);
+		const ColorRGBA SliderColorR = color_cast<ColorRGBA>(ColorHSVA(PickerColorHSV.x, PickerColorHSV.y, 1.0f, 1.0f));
+		ValueSliderRect.Draw4(SliderColorL, SliderColorR, SliderColorL, SliderColorR, IGraphics::CORNER_ALL, SliderRound);
+
+		// Logic via m_ColorPickerId
+		float SliderPickX, SliderPickY;
+		EEditState SliderRes = pUI->DoPickerLogic(&pColorPicker->m_ColorPickerId, &ValueSliderRect, &SliderPickX, &SliderPickY);
+		if(SliderRes != EEditState::NONE)
+		{
+			PickerColorHSV.z = std::clamp(SliderPickX / ValueSliderRect.w, 0.0f, 1.0f);
+			PickerColorHSL = color_cast<ColorHSLA>(PickerColorHSV);
+			PickerColorRGB = color_cast<ColorRGBA>(PickerColorHSL);
+			pColorPicker->m_State = SliderRes;
+		}
+
+		// Value slider marker — clamp so it stays within the slider rect
+		const float MarkerR = ValueSliderRect.h / 2.0f + 2.0f;
+		const float ValMarkerX = std::clamp(ValueSliderRect.x + PickerColorHSV.z * ValueSliderRect.w, ValueSliderRect.x + MarkerR, ValueSliderRect.x + ValueSliderRect.w - MarkerR);
+		const float ValMarkerY = ValueSliderRect.y + ValueSliderRect.h / 2.0f;
+		pUI->Graphics()->TextureClear();
+		pUI->Graphics()->QuadsBegin();
+		pUI->Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+		pUI->Graphics()->DrawCircle(ValMarkerX, ValMarkerY, MarkerR, 24);
+		pUI->Graphics()->SetColor(0.1f, 0.1f, 0.1f, 1.0f);
+		pUI->Graphics()->DrawCircle(ValMarkerX, ValMarkerY, ValueSliderRect.h / 2.0f + 0.5f, 24);
+		pUI->Graphics()->QuadsEnd();
+	}
+
+	// --- Alpha Slider ---
+	const auto &&RenderAlphaSelector = [&](unsigned OldA) -> SEditResult<int64_t> {
+		if(pColorPicker->m_Alpha)
+			return pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[3], &AlphaRect, "A:", OldA, 0, 255);
+		return {EEditState::NONE, (int64_t)OldA};
+	};
+
+	if(pColorPicker->m_Alpha && pColorPicker->m_ShowAlphaSlider)
+	{
+		const ColorRGBA AlphaL = ColorRGBA(0.0f, 0.0f, 0.0f, 1.0f);
+		const ColorRGBA AlphaR = ColorRGBA(PickerColorRGB.r, PickerColorRGB.g, PickerColorRGB.b, 1.0f);
+		AlphaSliderRect.Draw4(AlphaL, AlphaR, AlphaL, AlphaR, IGraphics::CORNER_ALL, SliderRound);
+
+		const float AlphaMarkerX = AlphaSliderRect.x + PickerColorHSV.a * AlphaSliderRect.w;
+		const float AlphaMarkerY = AlphaSliderRect.y + AlphaSliderRect.h / 2.0f;
+		pUI->Graphics()->TextureClear();
+		pUI->Graphics()->QuadsBegin();
+		pUI->Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+		pUI->Graphics()->DrawCircle(AlphaMarkerX, AlphaMarkerY, AlphaSliderRect.h / 2.0f + 2.0f, 24);
+		pUI->Graphics()->SetColor(0.1f, 0.1f, 0.1f, 1.0f);
+		pUI->Graphics()->DrawCircle(AlphaMarkerX, AlphaMarkerY, AlphaSliderRect.h / 2.0f + 0.5f, 24);
+		pUI->Graphics()->QuadsEnd();
+	}
+
+	// --- Numeric fields ---
+	if(pColorPicker->m_ColorMode == SColorPickerPopupContext::MODE_HSVA)
+	{
+		const unsigned OldH = round_to_int(PickerColorHSV.h * 255.0f);
+		const unsigned OldS = round_to_int(PickerColorHSV.s * 255.0f);
+		const unsigned OldV = round_to_int(PickerColorHSV.v * 255.0f);
+		const unsigned OldA = round_to_int(PickerColorHSV.a * 255.0f);
+
+		const auto [StateH, H] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[0], &HueRect, "H:", OldH, 0, 255);
+		const auto [StateS, S] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[1], &SatRect, "S:", OldS, 0, 255);
+		const auto [StateV, V] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[2], &ValueRect, "V:", OldV, 0, 255);
+		const auto [StateA, A] = RenderAlphaSelector(OldA);
+
+		if(OldH != H || OldS != S || OldV != V || OldA != A)
+		{
+			PickerColorHSV = ColorHSVA(H / 255.0f, S / 255.0f, V / 255.0f, A / 255.0f);
+			PickerColorHSL = color_cast<ColorHSLA>(PickerColorHSV);
+			PickerColorRGB = color_cast<ColorRGBA>(PickerColorHSL);
+		}
+
+		for(auto State : {StateH, StateS, StateV, StateA})
+		{
+			if(State != EEditState::NONE)
+			{
+				pColorPicker->m_State = State;
+				break;
+			}
+		}
+	}
+	else if(pColorPicker->m_ColorMode == SColorPickerPopupContext::MODE_RGBA)
+	{
+		const unsigned OldR = round_to_int(PickerColorRGB.r * 255.0f);
+		const unsigned OldG = round_to_int(PickerColorRGB.g * 255.0f);
+		const unsigned OldB = round_to_int(PickerColorRGB.b * 255.0f);
+		const unsigned OldA = round_to_int(PickerColorRGB.a * 255.0f);
+
+		const auto [StateR, R] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[0], &HueRect, "R:", OldR, 0, 255);
+		const auto [StateG, G] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[1], &SatRect, "G:", OldG, 0, 255);
+		const auto [StateB, B] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[2], &ValueRect, "B:", OldB, 0, 255);
+		const auto [StateA, A] = RenderAlphaSelector(OldA);
+
+		if(OldR != R || OldG != G || OldB != B || OldA != A)
+		{
+			PickerColorRGB = ColorRGBA(R / 255.0f, G / 255.0f, B / 255.0f, A / 255.0f);
+			PickerColorHSL = color_cast<ColorHSLA>(PickerColorRGB);
+			PickerColorHSV = color_cast<ColorHSVA>(PickerColorHSL);
+		}
+
+		for(auto State : {StateR, StateG, StateB, StateA})
+		{
+			if(State != EEditState::NONE)
+			{
+				pColorPicker->m_State = State;
+				break;
+			}
+		}
+	}
+	else if(pColorPicker->m_ColorMode == SColorPickerPopupContext::MODE_HSLA)
+	{
+		const unsigned OldH = round_to_int(PickerColorHSL.h * 255.0f);
+		const unsigned OldS = round_to_int(PickerColorHSL.s * 255.0f);
+		const unsigned OldL = round_to_int(PickerColorHSL.l * 255.0f);
+		const unsigned OldA = round_to_int(PickerColorHSL.a * 255.0f);
+
+		const auto [StateH, H] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[0], &HueRect, "H:", OldH, 0, 255);
+		const auto [StateS, S] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[1], &SatRect, "S:", OldS, 0, 255);
+		const auto [StateL, L] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[2], &ValueRect, "L:", OldL, 0, 255);
+		const auto [StateA, A] = RenderAlphaSelector(OldA);
+
+		if(OldH != H || OldS != S || OldL != L || OldA != A)
+		{
+			PickerColorHSL = ColorHSLA(H / 255.0f, S / 255.0f, L / 255.0f, A / 255.0f);
+			PickerColorHSV = color_cast<ColorHSVA>(PickerColorHSL);
+			PickerColorRGB = color_cast<ColorRGBA>(PickerColorHSL);
+		}
+
+		for(auto State : {StateH, StateS, StateL, StateA})
+		{
+			if(State != EEditState::NONE)
+			{
+				pColorPicker->m_State = State;
+				break;
+			}
+		}
+	}
+	else
+	{
+		dbg_assert_failed("Color picker mode invalid: %d", (int)pColorPicker->m_ColorMode);
+	}
+
+	SValueSelectorProperties Props;
+	Props.m_UseScroll = false;
+	Props.m_IsHex = true;
+	Props.m_HexPrefix = pColorPicker->m_Alpha ? 8 : 6;
+	const unsigned OldHex = PickerColorRGB.PackAlphaLast(pColorPicker->m_Alpha);
+	auto [HexState, Hex] = pUI->DoValueSelectorWithState(&pColorPicker->m_aValueSelectorIds[4], &HexRect, "Hex:", OldHex, 0, pColorPicker->m_Alpha ? 0xFFFFFFFFll : 0xFFFFFFll, Props);
+	if(OldHex != Hex)
+	{
+		const float OldAlpha = PickerColorRGB.a;
+		PickerColorRGB = ColorRGBA::UnpackAlphaLast<ColorRGBA>(Hex, pColorPicker->m_Alpha);
+		if(!pColorPicker->m_Alpha)
+			PickerColorRGB.a = OldAlpha;
+		PickerColorHSL = color_cast<ColorHSLA>(PickerColorRGB);
+		PickerColorHSV = color_cast<ColorHSVA>(PickerColorHSL);
+	}
+
+	if(HexState != EEditState::NONE)
+		pColorPicker->m_State = HexState;
+
+	// Write back
+	pColorPicker->m_HsvaColor = PickerColorHSV;
+	pColorPicker->m_RgbaColor = PickerColorRGB;
+	pColorPicker->m_HslaColor = PickerColorHSL;
+	if(pColorPicker->m_pHslaColor != nullptr)
+		*pColorPicker->m_pHslaColor = PickerColorHSL.Pack(pColorPicker->m_Alpha);
+
+	// Mode buttons
+	static constexpr SColorPickerPopupContext::EColorPickerMode PICKER_MODES[] = {SColorPickerPopupContext::MODE_HSVA, SColorPickerPopupContext::MODE_RGBA, SColorPickerPopupContext::MODE_HSLA};
+	static constexpr const char *PICKER_MODE_LABELS[] = {"HSVA", "RGBA", "HSLA"};
+	static_assert(std::size(PICKER_MODES) == std::size(PICKER_MODE_LABELS));
+	const float ModeButtonW = (ModeButtonArea.w - ValuePadding * 2) / 3.0f;
+	for(SColorPickerPopupContext::EColorPickerMode Mode : PICKER_MODES)
+	{
+		CUIRect ModeButton;
+		ModeButtonArea.VSplitLeft(ModeButtonW, &ModeButton, &ModeButtonArea);
+		ModeButtonArea.VSplitLeft(ValuePadding, nullptr, &ModeButtonArea);
+		if(pUI->DoButton_PopupMenu(&pColorPicker->m_aModeButtons[(int)Mode], PICKER_MODE_LABELS[(int)Mode], &ModeButton, 10.0f, TEXTALIGN_MC, 2.0f, false, pColorPicker->m_ColorMode != Mode))
 		{
 			pColorPicker->m_ColorMode = Mode;
 		}
@@ -2313,5 +2882,14 @@ void CUi::ShowPopupColorPicker(float X, float Y, SColorPickerPopupContext *pCont
 	pContext->m_pUI = this;
 	if(pContext->m_ColorMode == SColorPickerPopupContext::MODE_UNSET)
 		pContext->m_ColorMode = SColorPickerPopupContext::MODE_HSVA;
-	DoPopupMenu(pContext, X, Y, 160.0f + 10.0f, 209.0f + 10.0f, pContext, PopupColorPicker);
+	if(g_Config.m_BcNewColorPicker)
+	{
+		// Popup width: 170, height: wheel(160) + pad(4) + valslider(12) + pad(4) + [alphaslider(12) + pad(4)] + fields(18) + pad(4) + hex(18) + pad(4) + modes(18) + margins(10)
+		const float PopupH = 160.0f + 4.0f + 12.0f + 4.0f + (pContext->m_Alpha && pContext->m_ShowAlphaSlider ? 12.0f + 4.0f : 0.0f) + 18.0f + 4.0f + 18.0f + 4.0f + 18.0f + 10.0f;
+		DoPopupMenu(pContext, X, Y, 170.0f, PopupH, pContext, PopupColorPicker);
+	}
+	else
+	{
+		DoPopupMenu(pContext, X, Y, 160.0f + 10.0f, 209.0f + 10.0f, pContext, PopupColorPickerClassic);
+	}
 }

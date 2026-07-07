@@ -52,6 +52,7 @@ void CEditor::AddGroup()
 	Map()->NewGroup();
 	Map()->m_SelectedGroup = Map()->m_vpGroups.size() - 1;
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionGroup>(Map(), Map()->m_SelectedGroup, false));
+	m_DuoSession.NotifyAddGroup();
 }
 
 void CEditor::AddSoundLayer()
@@ -62,6 +63,7 @@ void CEditor::AddSoundLayer()
 	Map()->SelectLayer(LayerIndex);
 	Map()->m_vpGroups[Map()->m_SelectedGroup]->m_Collapse = false;
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_SOUNDS, pSoundLayer->m_aName);
 }
 
 void CEditor::AddTileLayer()
@@ -72,6 +74,7 @@ void CEditor::AddTileLayer()
 	Map()->SelectLayer(LayerIndex);
 	Map()->m_vpGroups[Map()->m_SelectedGroup]->m_Collapse = false;
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_TILES, pTileLayer->m_aName);
 }
 
 void CEditor::AddQuadsLayer()
@@ -82,6 +85,7 @@ void CEditor::AddQuadsLayer()
 	Map()->SelectLayer(LayerIndex);
 	Map()->m_vpGroups[Map()->m_SelectedGroup]->m_Collapse = false;
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_QUADS, pQuadLayer->m_aName);
 }
 
 void CEditor::AddSwitchLayer()
@@ -93,6 +97,7 @@ void CEditor::AddSwitchLayer()
 	Map()->SelectLayer(LayerIndex);
 	m_pBrush->Clear();
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_TILES, pSwitchLayer->m_aName, 4);
 }
 
 void CEditor::AddFrontLayer()
@@ -104,6 +109,7 @@ void CEditor::AddFrontLayer()
 	Map()->SelectLayer(LayerIndex);
 	m_pBrush->Clear();
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_TILES, pFrontLayer->m_aName, 1);
 }
 
 void CEditor::AddTuneLayer()
@@ -115,6 +121,7 @@ void CEditor::AddTuneLayer()
 	Map()->SelectLayer(LayerIndex);
 	m_pBrush->Clear();
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_TILES, pTuneLayer->m_aName, 5);
 }
 
 void CEditor::AddSpeedupLayer()
@@ -126,6 +133,7 @@ void CEditor::AddSpeedupLayer()
 	Map()->SelectLayer(LayerIndex);
 	m_pBrush->Clear();
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_TILES, pSpeedupLayer->m_aName, 3);
 }
 
 void CEditor::AddTeleLayer()
@@ -137,8 +145,8 @@ void CEditor::AddTeleLayer()
 	Map()->SelectLayer(LayerIndex);
 	m_pBrush->Clear();
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionAddLayer>(Map(), Map()->m_SelectedGroup, LayerIndex));
+	m_DuoSession.NotifyAddLayer(Map()->m_SelectedGroup, LayerIndex, LAYERTYPE_TILES, pTeleLayer->m_aName, 2);
 }
-
 bool CEditor::IsNonGameTileLayerSelected() const
 {
 	std::shared_ptr<CLayer> pLayer = Map()->SelectedLayer(0);
@@ -198,6 +206,10 @@ void CEditor::DeleteSelectedLayer()
 	if(Map()->m_pGameLayer == pCurrentLayer)
 		return;
 
+	int DelGroup = Map()->m_SelectedGroup;
+	int DelLayer = Map()->m_vSelectedLayers[0];
+	m_DuoSession.NotifyDelLayer(DelGroup, DelLayer);
+
 	Map()->m_EditorHistory.RecordAction(std::make_shared<CEditorActionDeleteLayer>(Map(), Map()->m_SelectedGroup, Map()->m_vSelectedLayers[0]));
 
 	if(pCurrentLayer == Map()->m_pFrontLayer)
@@ -231,6 +243,7 @@ void CEditor::TestMapLocally()
 	{
 		if(net_addr_is_local(&Client()->ServerAddress()))
 		{
+			m_DuoSession.m_LocalTestingActive = true;
 			OnClose();
 			g_Config.m_ClEditor = 0;
 			char aMapChange[IO_MAX_PATH_LENGTH + 64];
@@ -249,12 +262,13 @@ void CEditor::TestMapLocally()
 	else
 	{
 		char aMapChange[IO_MAX_PATH_LENGTH + 64];
-		str_format(aMapChange, sizeof(aMapChange), "change_map %s", aFilenameNoExt);
+		str_format(aMapChange, sizeof(aMapChange), "sv_map %s", aFilenameNoExt);
 		if(pGameClient->m_LocalServer.RunServer({"sv_register 0", aMapChange}))
 		{
+			m_DuoSession.m_LocalTestingActive = true;
 			OnClose();
 			g_Config.m_ClEditor = 0;
-			Client()->Connect("localhost");
+			Client()->Connect("127.0.0.1");
 		}
 		else
 		{

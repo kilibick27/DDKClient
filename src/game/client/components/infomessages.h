@@ -2,6 +2,8 @@
 /* If you are missing that file, acquire a complete release at teeworlds.com.                */
 #ifndef GAME_CLIENT_COMPONENTS_INFOMESSAGES_H
 #define GAME_CLIENT_COMPONENTS_INFOMESSAGES_H
+#include <cstdint>
+
 #include <engine/textrender.h>
 
 #include <game/client/component.h>
@@ -27,6 +29,7 @@ class CInfoMessages : public CComponent
 	{
 		EType m_Type;
 		int m_Tick;
+		int64_t m_AppearTime;
 
 		int m_aVictimIds[MAX_KILLMSG_TEAM_MEMBERS];
 		int m_VictimDDTeam;

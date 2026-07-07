@@ -341,17 +341,21 @@ void CInput::StartTextInput()
 {
 	// enable system messages for IME
 	SDL_EventState(SDL_SYSWMEVENT, SDL_ENABLE);
+	if(SDL_IsTextInputActive())
+		return;
 	SDL_StartTextInput();
 }
 
 void CInput::StopTextInput()
 {
-	SDL_StopTextInput();
+	if(SDL_IsTextInputActive())
+		SDL_StopTextInput();
 	// disable system messages for performance
 	SDL_EventState(SDL_SYSWMEVENT, SDL_DISABLE);
 	m_CompositionString = "";
 	m_CompositionCursor = 0;
 	m_vCandidates.clear();
+	m_TextInputRectValid = false;
 }
 
 void CInput::EnsureScreenKeyboardShown()
@@ -598,6 +602,16 @@ void CInput::SetCompositionWindowPosition(float X, float Y, float H)
 	Rect.y = Y / m_pGraphics->ScreenHiDPIScale();
 	Rect.h = H / m_pGraphics->ScreenHiDPIScale();
 	Rect.w = 0;
+	if(m_TextInputRectValid &&
+		m_TextInputRect.x == Rect.x &&
+		m_TextInputRect.y == Rect.y &&
+		m_TextInputRect.w == Rect.w &&
+		m_TextInputRect.h == Rect.h)
+	{
+		return;
+	}
+	m_TextInputRect = Rect;
+	m_TextInputRectValid = true;
 	SDL_SetTextInputRect(&Rect);
 }
 
@@ -851,10 +865,7 @@ int CInput::Update()
 #if defined(CONF_PLATFORM_ANDROID) // Save the config when minimized on Android.
 				m_pConfigManager->Save();
 #endif
-#if !defined(CONF_PLATFORM_WINDOWS)
-				// TClient: On Windows with Vulkan, don't destroy window on minimize to prevent screen flashing on Alt+Tab
 				Graphics()->WindowDestroyNtf(Event.window.windowID);
-#endif
 				break;
 
 			case SDL_WINDOWEVENT_MAXIMIZED:
@@ -864,10 +875,7 @@ int CInput::Update()
 #endif
 				[[fallthrough]];
 			case SDL_WINDOWEVENT_RESTORED:
-#if !defined(CONF_PLATFORM_WINDOWS)
-				// TClient: On Windows with Vulkan, don't recreate window on restore to prevent screen flashing on Alt+Tab
 				Graphics()->WindowCreateNtf(Event.window.windowID);
-#endif
 				break;
 			}
 			break;

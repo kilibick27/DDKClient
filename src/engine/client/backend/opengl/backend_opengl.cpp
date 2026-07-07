@@ -1075,6 +1075,12 @@ ERunCommandReturnTypes CCommandProcessorFragment_OpenGL::RunCommand(const CComma
 	case CCommandBuffer::CMD_RENDER_TEX3D:
 		Cmd_RenderTex3D(static_cast<const CCommandBuffer::SCommand_RenderTex3D *>(pBaseCommand));
 		break;
+	case CCommandBuffer::CMD_RENDER_GLOW_RECT:
+		Cmd_RenderGlowRect(static_cast<const CCommandBuffer::SCommand_RenderGlowRect *>(pBaseCommand));
+		break;
+	case CCommandBuffer::CMD_RENDER_BLUR_RECT:
+		Cmd_RenderBlurRect(static_cast<const CCommandBuffer::SCommand_RenderBlurRect *>(pBaseCommand));
+		break;
 	case CCommandBuffer::CMD_TRY_SWAP_AND_READ_PIXEL:
 		Cmd_ReadPixel(static_cast<const CCommandBuffer::SCommand_TrySwapAndReadPixel *>(pBaseCommand));
 		break;
@@ -1104,6 +1110,9 @@ ERunCommandReturnTypes CCommandProcessorFragment_OpenGL::RunCommand(const CComma
 	case CCommandBuffer::CMD_RENDER_QUAD_CONTAINER: Cmd_RenderQuadContainer(static_cast<const CCommandBuffer::SCommand_RenderQuadContainer *>(pBaseCommand)); break;
 	case CCommandBuffer::CMD_RENDER_QUAD_CONTAINER_EX: Cmd_RenderQuadContainerEx(static_cast<const CCommandBuffer::SCommand_RenderQuadContainerEx *>(pBaseCommand)); break;
 	case CCommandBuffer::CMD_RENDER_QUAD_CONTAINER_SPRITE_MULTIPLE: Cmd_RenderQuadContainerAsSpriteMultiple(static_cast<const CCommandBuffer::SCommand_RenderQuadContainerAsSpriteMultiple *>(pBaseCommand)); break;
+	case CCommandBuffer::CMD_SWAP:
+		Cmd_BeforeSwap();
+		return ERunCommandReturnTypes::RUN_COMMAND_COMMAND_UNHANDLED; // let SDL do the actual swap
 	default: return ERunCommandReturnTypes::RUN_COMMAND_COMMAND_UNHANDLED;
 	}
 

@@ -21,6 +21,7 @@
 
 #include <game/client/ui.h>
 #include <game/client/ui_listbox.h>
+#include <game/editor/duo/duo_session.h>
 #include <game/editor/enums.h>
 #include <game/editor/file_browser.h>
 #include <game/editor/mapitems/envelope.h>
@@ -167,6 +168,8 @@ public:
 	const CMapView *MapView() const { return &m_MapView; }
 	CLayerSelector *LayerSelector() { return &m_LayerSelector; }
 
+	CDuoSession m_DuoSession;
+
 	void FillGameTiles(EGameTileOp FillTile) const;
 	bool CanFillGameTiles() const;
 	void AddQuadOrSound();
@@ -289,6 +292,7 @@ public:
 
 	void Init() override;
 	void OnUpdate() override;
+	void OnBackgroundUpdate() override;
 	void OnRender() override;
 	void OnActivate() override;
 	void OnWindowResize() override;
@@ -364,6 +368,7 @@ public:
 	 * File which is pending to be loaded by @link POPEVENT_LOADDROP @endlink.
 	 */
 	char m_aFilenamePendingLoad[IO_MAX_PATH_LENGTH] = "";
+	int m_PendingLoadStorageType = 0;
 
 	enum
 	{
@@ -386,6 +391,9 @@ public:
 		POPEVENT_REMOVE_USED_SOUND,
 		POPEVENT_RESTART_SERVER,
 		POPEVENT_RESTARTING_SERVER,
+		POPEVENT_DUO_LOAD,
+		POPEVENT_DUO_NOT_OWNER,
+		POPEVENT_DUO_NEW,
 	};
 
 	int m_PopupEventType;

@@ -25,6 +25,14 @@ CEffects::CEffects()
 
 void CEffects::AirJump(vec2 Pos, float Alpha, float Volume)
 {
+	// Check focus mode settings
+	if(g_Config.m_ClFocusMode && g_Config.m_ClFocusModeHideEffects)
+	{
+		if(g_Config.m_SndGame)
+			GameClient()->m_Sounds.PlayAt(CSounds::CHN_WORLD, SOUND_PLAYER_AIRJUMP, 1.0f, Pos);
+		return;
+	}
+
 	CParticle p;
 	p.SetDefault();
 	p.m_Spr = SPRITE_PART_AIRJUMP;
@@ -79,6 +87,10 @@ void CEffects::PowerupShine(vec2 Pos, vec2 Size, float Alpha)
 
 void CEffects::FreezingFlakes(vec2 Pos, vec2 Size, float Alpha)
 {
+	// Check focus mode settings
+	if(g_Config.m_ClFocusMode && g_Config.m_ClFocusModeHideEffects)
+		return;
+
 	if(!m_Add5hz)
 		return;
 
@@ -391,8 +403,15 @@ void CEffects::Explosion(vec2 Pos, float Alpha)
 	}
 }
 
-void CEffects::HammerHit(vec2 Pos, float Alpha, float Volume)
+void CEffects::HammerHit(vec2 Pos, float Alpha, float Volume, bool OtherPlayer)
 {
+	if(g_Config.m_ClFocusMode && g_Config.m_ClFocusModeHideEffects)
+	{
+		if(g_Config.m_SndGame && g_Config.m_ClHammerHitEffectSound && !(OtherPlayer && g_Config.m_BcMuteOthersHammer))
+			GameClient()->m_Sounds.PlayAt(CSounds::CHN_WORLD, SOUND_HAMMER_HIT, 1.0f, Pos);
+		return;
+	}
+
 	// add the explosion
 	CParticle p;
 	p.SetDefault();
@@ -405,7 +424,7 @@ void CEffects::HammerHit(vec2 Pos, float Alpha, float Volume)
 	p.m_Color.a = Alpha;
 	p.m_StartAlpha = Alpha;
 	GameClient()->m_Particles.Add(CParticles::GROUP_EXPLOSIONS, &p);
-	if(g_Config.m_SndGame)
+	if(g_Config.m_SndGame && !(OtherPlayer && g_Config.m_BcMuteOthersHammer))
 		GameClient()->m_Sounds.PlayAt(CSounds::CHN_WORLD, SOUND_HAMMER_HIT, Volume, Pos);
 }
 
