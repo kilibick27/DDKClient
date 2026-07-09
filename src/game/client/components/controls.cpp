@@ -32,9 +32,11 @@ CControls::CControls()
 	std::fill(std::begin(m_aMousePos), std::end(m_aMousePos), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMousePosOnAction), std::end(m_aMousePosOnAction), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aTargetPos), std::end(m_aTargetPos), vec2(0.0f, 0.0f));
+	std::fill(std::begin(m_aAutoAimSmoothDir), std::end(m_aAutoAimSmoothDir), vec2(0.0f, 0.0f));
 	std::fill(std::begin(m_aMouseInputType), std::end(m_aMouseInputType), EMouseInputType::ABSOLUTE);
 	m_AutoFollowTargetId = -1;
 	m_DummyAutoHookTargetId = -1;
+	m_AutoHammerLastFireTick = 0;
 }
 
 void CControls::OnReset()
@@ -409,7 +411,12 @@ int CControls::SnapInput(int *pData)
 		const bool RightPressed = m_aInputDirectionRight[g_Config.m_ClDummy] != 0;
 		m_aInputData[g_Config.m_ClDummy].m_Direction = ResolveMovementDirection(g_Config.m_ClDummy, LeftPressed, RightPressed);
 
-		// Auto aim hook to nearest player
+		// Auto aim hook to nearest player.
+		// Antiping-aware: when player prediction is active the hook leads the tee (intercept point
+		// from its predicted velocity) instead of aiming at its current position, so it hooks ahead
+		// of where the tee is flying. Any tee whose hook line is blocked by tiles is skipped, so the
+		// helper falls through to the nearest tee that is actually reachable. If no tee is reachable,
+		// the aim is left untouched (you hook wherever you are looking, no auto-aim).
 		if(g_Config.m_ClAutoAim && m_aInputData[g_Config.m_ClDummy].m_Hook)
 		{
 			int LocalClientId = GameClient()->m_Snap.m_LocalClientId;
@@ -418,12 +425,59 @@ int CControls::SnapInput(int *pData)
 				vec2 LocalPos = GameClient()->m_LocalCharacterPos;
 				vec2 AimDir = normalize(vec2(m_aInputData[g_Config.m_ClDummy].m_TargetX, m_aInputData[g_Config.m_ClDummy].m_TargetY));
 
+				const bool UseAntiPing = GameClient()->AntiPingPlayers();
+
 				float MinDistance = -1.0f;
 				vec2 BestTarget;
 				bool FoundTarget = false;
 
-				const float MaxHookRange = 375.0f;
-				const float MaxAngle = 90.0f * 3.14159f / 180.0f;
+				// Frozen-friend priority tier: when ddk_hook_friend_priority is on, any frozen
+				// friend that is in range/cone/reachable wins over the normal nearest tee, so the
+				// hook goes to unfreeze a teammate first.
+				float MinFriendDistance = -1.0f;
+				vec2 BestFriendTarget;
+				bool FoundFriendTarget = false;
+
+				const float MaxHookRange = ms_AutoAimHookRange;
+				const float MaxAngle = (g_Config.m_ClAutoAimFov / 2.0f) * pi / 180.0f;
+
+				// Sweeps points around a tee's hitbox to find one our hook line can reach without
+				// crossing solid tiles. The server grabs a hook as soon as its line's closest approach
+				// to the tee comes within PhysicalSize+2px (see CCharacterCore::Move), so landing the
+				// ray anywhere on the hitbox boundary is enough — not just the center. The sweep starts
+				// at the point facing straight at `From` (offset 0, the closest possible part of the
+				// tee) and alternates outward left/right around the circle, so the first reachable point
+				// found is always the nearest possible part of the tee, letting the hook reach around a
+				// corner block that only covers the tee's near side.
+				auto FindHookableHitboxPoint = [this](vec2 From, vec2 Center, vec2 *pOutRelative) -> bool {
+					const vec2 ToCenter = Center - From;
+					const float CenterDist = length(ToCenter);
+					// Too close for a hitbox-radius offset to make sense; aim straight at the center.
+					if(CenterDist <= CCharacterCore::PhysicalSize())
+					{
+						if(Collision()->IntersectLine(From, Center, nullptr, nullptr))
+							return false;
+						*pOutRelative = ToCenter;
+						return true;
+					}
+
+					const vec2 NearDir = ToCenter / CenterDist;
+					const float Radius = CCharacterCore::PhysicalSize();
+					static const float s_aSweepDeg[] = {0.0f, 15.0f, -15.0f, 30.0f, -30.0f, 45.0f, -45.0f,
+						60.0f, -60.0f, 90.0f, -90.0f, 120.0f, -120.0f, 150.0f, -150.0f, 180.0f};
+
+					for(float OffsetDeg : s_aSweepDeg)
+					{
+						const vec2 EdgeDir = OffsetDeg == 0.0f ? NearDir : rotate(NearDir, OffsetDeg);
+						const vec2 Candidate = Center - EdgeDir * Radius;
+						if(!Collision()->IntersectLine(From, Candidate, nullptr, nullptr))
+						{
+							*pOutRelative = Candidate - From;
+							return true;
+						}
+					}
+					return false;
+				};
 
 				for(int i = 0; i < MAX_CLIENTS; i++)
 				{
@@ -431,26 +485,228 @@ int CControls::SnapInput(int *pData)
 						continue;
 					if(!GameClient()->m_Snap.m_aCharacters[i].m_Active)
 						continue;
-					const CNetObj_Character &Char = GameClient()->m_Snap.m_aCharacters[i].m_Cur;
-					vec2 OtherPos = vec2(Char.m_X, Char.m_Y);
-					vec2 ToTarget = OtherPos - LocalPos;
+
+					// Friend/frozen based filtering for the DDK AimHelper toggles.
+					const bool IsFriend = GameClient()->m_aClients[i].m_Friend;
+					const bool IsFrozen = GameClient()->m_aClients[i].m_FreezeEnd > 0 || GameClient()->m_aClients[i].m_DeepFrozen;
+					// A frozen friend that priority mode wants to grab (to unfreeze them). This
+					// overrides "don't hook friends" so teammates can still be pulled out of freeze.
+					const bool FrozenFriendPriority = g_Config.m_DdkHookFriendPriority && IsFriend && IsFrozen;
+					if(g_Config.m_DdkHookFriendsOnly && !IsFriend)
+						continue;
+					if(g_Config.m_DdkHookNoFriends && IsFriend && !FrozenFriendPriority)
+						continue;
+
+					// Tee position/velocity: use the antiping prediction when available so the hook can
+					// lead a flying tee; otherwise fall back to the raw snapshot position (no lead).
+					vec2 TargetPos;
+					vec2 TargetVel = vec2(0.0f, 0.0f);
+					if(UseAntiPing)
+					{
+						TargetPos = GameClient()->m_aClients[i].m_Predicted.m_Pos;
+						TargetVel = GameClient()->m_aClients[i].m_Predicted.m_Vel;
+					}
+					else
+					{
+						const CNetObj_Character &Char = GameClient()->m_Snap.m_aCharacters[i].m_Cur;
+						TargetPos = vec2(Char.m_X, Char.m_Y);
+					}
+
+					vec2 ToTarget = TargetPos - LocalPos;
 					float Distance = length(ToTarget);
 					if(Distance > MaxHookRange || Distance < 1.0f)
 						continue;
+
+					// FOV cone check against the tee's current position.
 					vec2 ToTargetNorm = normalize(ToTarget);
 					float DotProduct = dot(AimDir, ToTargetNorm);
 					float Angle = std::acos(std::clamp(DotProduct, -1.0f, 1.0f));
-					if(Angle <= MaxAngle && (MinDistance < 0.0f || Distance < MinDistance))
+					if(Angle > MaxAngle)
+						continue;
+
+					// Lead the hook: estimate how many ticks the hook needs to reach the tee and advance
+					// the tee along its predicted velocity by that much. The hook grows by HookFireSpeed
+					// pixels per tick; a few iterations converge on the intercept point.
+					vec2 AimPos = TargetPos;
+					if(UseAntiPing)
+					{
+						const float HookFireSpeed = (float)GameClient()->m_aClients[i].m_Predicted.m_Tuning.m_HookFireSpeed;
+						if(HookFireSpeed > 0.0f)
+						{
+							for(int It = 0; It < 3; ++It)
+							{
+								const float TravelTicks = distance(LocalPos, AimPos) / HookFireSpeed;
+								AimPos = TargetPos + TargetVel * TravelTicks;
+							}
+						}
+					}
+
+					// Reachability: sweep points around the tee's hitbox for one our hook line can reach
+					// without crossing solid tiles, starting from the point nearest to us. The server
+					// grabs a hook as soon as its line comes within PhysicalSize+2px of the tee, so any
+					// point on the hitbox boundary works — this lets us hook around a corner block that
+					// only covers the near side of the tee, instead of giving up on it entirely. If
+					// nothing on the hitbox is reachable, this tee can't be hooked at all — skip it so a
+					// further but reachable tee is chosen instead.
+					vec2 EdgeTarget;
+					if(!FindHookableHitboxPoint(LocalPos, AimPos, &EdgeTarget))
+						continue;
+
+					if(MinDistance < 0.0f || Distance < MinDistance)
+					{
+						MinDistance = Distance;
+						BestTarget = EdgeTarget;
+						FoundTarget = true;
+					}
+					if(FrozenFriendPriority && (MinFriendDistance < 0.0f || Distance < MinFriendDistance))
+					{
+						MinFriendDistance = Distance;
+						BestFriendTarget = EdgeTarget;
+						FoundFriendTarget = true;
+					}
+				}
+				// Frozen friends win over the plain nearest tee when priority mode is enabled.
+				bool HaveTarget = FoundFriendTarget || FoundTarget;
+				vec2 ChosenTarget = FoundFriendTarget ? BestFriendTarget : BestTarget;
+
+				if(HaveTarget)
+				{
+					const int Dummy = g_Config.m_ClDummy;
+					const float ChosenLen = length(ChosenTarget);
+
+					// Accuracy: rotate the aim vector by a random angle that grows as accuracy drops,
+					// so a lower setting visibly lowers the effective hit rate instead of aiming perfectly.
+					// rotate() takes degrees (it converts to radians internally).
+					if(g_Config.m_DdkHookAccuracy < 100 && ChosenLen > 0.0f)
+					{
+						const float MaxJitterDeg = (100 - g_Config.m_DdkHookAccuracy) * 0.25f;
+						const float JitterDeg = random_float(-MaxJitterDeg, MaxJitterDeg);
+						ChosenTarget = rotate(ChosenTarget, JitterDeg);
+					}
+
+					// Silent: turn toward the (possibly jittered) target by a limited rate per tick
+					// instead of snapping instantly, so the hook looks like a legitimate flick.
+					if(g_Config.m_DdkHookSilent)
+					{
+						vec2 &SmoothDir = m_aAutoAimSmoothDir[Dummy];
+						if(SmoothDir.x == 0.0f && SmoothDir.y == 0.0f)
+						{
+							SmoothDir = ChosenTarget;
+						}
+						else
+						{
+							const float SilentTurnDegPerTick = 12.0f;
+							const float MaxTurn = SilentTurnDegPerTick * pi / 180.0f;
+							const float FromAngle = angle(SmoothDir);
+							const float ToAngle = angle(ChosenTarget);
+							float DeltaAngle = std::fmod(ToAngle - FromAngle + pi * 3.0f, pi * 2.0f) - pi;
+							DeltaAngle = std::clamp(DeltaAngle, -MaxTurn, MaxTurn);
+							const float NewLen = length(ChosenTarget);
+							SmoothDir = direction(FromAngle + DeltaAngle) * (NewLen > 0.0f ? NewLen : ChosenLen);
+						}
+						ChosenTarget = SmoothDir;
+					}
+					else
+					{
+						// Not using Silent: keep the smoothing state cleared so re-enabling it later
+						// starts fresh instead of resuming a stale sweep.
+						m_aAutoAimSmoothDir[Dummy] = vec2(0.0f, 0.0f);
+					}
+
+					m_aInputData[Dummy].m_TargetX = (int)ChosenTarget.x;
+					m_aInputData[Dummy].m_TargetY = (int)ChosenTarget.y;
+				}
+				// A (0,0) target is interpreted by the game as aiming straight up; nudge X so the
+				// hook keeps pointing at the tee instead of snapping vertical.
+				if(HaveTarget &&
+					!m_aInputData[g_Config.m_ClDummy].m_TargetX && !m_aInputData[g_Config.m_ClDummy].m_TargetY)
+					m_aInputData[g_Config.m_ClDummy].m_TargetX = 1;
+			}
+		}
+
+		// DDK Auto Hammer: hammer the nearest enemy within melee reach. Friend/frozen filtering is
+		// configurable. The targeted swing (which redirects aim and switches to hammer) only runs
+		// while the hook is NOT held, so it never disturbs a hook. Fast Hammer, however, keeps
+		// spamming the hammer even while hooking or performing any other action.
+		if(g_Config.m_DdkAutoHammer)
+		{
+			int LocalClientId = GameClient()->m_Snap.m_LocalClientId;
+			if(LocalClientId >= 0 && GameClient()->m_Snap.m_pLocalCharacter)
+			{
+				vec2 LocalPos = GameClient()->m_LocalCharacterPos;
+				float MinDistance = -1.0f;
+				vec2 BestTarget;
+				bool FoundTarget = false;
+
+				for(int i = 0; i < MAX_CLIENTS; i++)
+				{
+					if(i == LocalClientId)
+						continue;
+					if(!GameClient()->m_Snap.m_aCharacters[i].m_Active)
+						continue;
+					// Friend/frozen filtering is configurable: by default skip friends and don't waste
+					// hits on already-frozen tees, but either can be turned off in the DDK menu.
+					if(!g_Config.m_DdkAutoHammerHitFriends && GameClient()->m_aClients[i].m_Friend)
+						continue;
+					if(g_Config.m_DdkAutoHammerSkipFrozen &&
+						(GameClient()->m_aClients[i].m_FreezeEnd > 0 || GameClient()->m_aClients[i].m_DeepFrozen))
+						continue;
+
+					const CNetObj_Character &Char = GameClient()->m_Snap.m_aCharacters[i].m_Cur;
+					vec2 TargetPos = vec2(Char.m_X, Char.m_Y);
+					vec2 ToTarget = TargetPos - LocalPos;
+					float Distance = length(ToTarget);
+					if(Distance > (float)g_Config.m_DdkAutoHammerRange || Distance < 1.0f)
+						continue;
+					// A wall between us means the hammer can't reach the tee.
+					if(Collision()->IntersectLine(LocalPos, TargetPos, nullptr, nullptr))
+						continue;
+
+					if(MinDistance < 0.0f || Distance < MinDistance)
 					{
 						MinDistance = Distance;
 						BestTarget = ToTarget;
 						FoundTarget = true;
 					}
 				}
-				if(FoundTarget)
+
+				if(FoundTarget && !m_aInputData[g_Config.m_ClDummy].m_Hook)
 				{
+					// Aim at the enemy and switch to hammer so the swing connects.
 					m_aInputData[g_Config.m_ClDummy].m_TargetX = (int)BestTarget.x;
 					m_aInputData[g_Config.m_ClDummy].m_TargetY = (int)BestTarget.y;
+					if(!m_aInputData[g_Config.m_ClDummy].m_TargetX && !m_aInputData[g_Config.m_ClDummy].m_TargetY)
+						m_aInputData[g_Config.m_ClDummy].m_TargetX = 1;
+					m_aInputData[g_Config.m_ClDummy].m_WantedWeapon = WEAPON_HAMMER + 1;
+
+					// Rate-limit swings to roughly the server hammer fire delay so we don't spam.
+					// Hammer is not full-auto, so each swing needs a fresh counted press. Bumping the
+					// fire counter by 2 registers exactly one press (see CountInput) while preserving
+					// parity, so it never corrupts the real fire-key state. Only fire once the weapon
+					// has actually switched to hammer.
+					// Fast hammer: bump one counted press every tick for maximum spam; otherwise
+					// rate-limit to roughly the server hammer fire delay.
+					const int HammerCooldownTicks = g_Config.m_DdkAutoHammerFast ? 1 : maximum(1, Client()->GameTickSpeed() / 8);
+					const int Now = Client()->GameTick(g_Config.m_ClDummy);
+					if(Now - m_AutoHammerLastFireTick >= HammerCooldownTicks &&
+						GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_HAMMER)
+					{
+						m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 2) & INPUT_STATE_MASK;
+						m_AutoHammerLastFireTick = Now;
+					}
+				}
+				else if(g_Config.m_DdkAutoHammerFast &&
+					GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_HAMMER)
+				{
+					// Fast hammer with no target in range: just keep swinging the hammer as fast as
+					// possible (one counted press per tick) at the current aim, without redirecting it.
+					// Only while the hammer is actually the active weapon, so it never spams other guns.
+					const int Now = Client()->GameTick(g_Config.m_ClDummy);
+					if(Now - m_AutoHammerLastFireTick >= 1)
+					{
+						m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 2) & INPUT_STATE_MASK;
+						m_AutoHammerLastFireTick = Now;
+					}
 				}
 			}
 		}

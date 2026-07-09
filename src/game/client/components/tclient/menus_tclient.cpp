@@ -158,6 +158,38 @@ bool CMenus::DoLine_KeyReader(CUIRect &View, CButtonContainer &ReaderButton, CBu
 	return false;
 }
 
+bool CMenus::DoKeyReaderForCommand(const CUIRect *pRect, CButtonContainer &ReaderButton, CButtonContainer &ClearButton, const char *pCommand)
+{
+	CBindSlot Bind(0, 0);
+	for(int Mod = 0; Mod < KeyModifier::COMBINATION_COUNT; Mod++)
+	{
+		for(int KeyId = 0; KeyId < KEY_LAST; KeyId++)
+		{
+			const char *pBind = GameClient()->m_Binds.Get(KeyId, Mod);
+			if(!pBind[0])
+				continue;
+
+			if(str_comp(pBind, pCommand) == 0)
+			{
+				Bind.m_Key = KeyId;
+				Bind.m_ModifierMask = Mod;
+				break;
+			}
+		}
+	}
+
+	const auto Result = GameClient()->m_KeyBinder.DoKeyReader(&ReaderButton, &ClearButton, pRect, Bind, false);
+	if(Result.m_Bind != Bind)
+	{
+		if(Bind.m_Key != KEY_UNKNOWN)
+			GameClient()->m_Binds.Bind(Bind.m_Key, "", false, Bind.m_ModifierMask);
+		if(Result.m_Bind.m_Key != KEY_UNKNOWN)
+			GameClient()->m_Binds.Bind(Result.m_Bind.m_Key, pCommand, false, Result.m_Bind.m_ModifierMask);
+		return true;
+	}
+	return false;
+}
+
 bool CMenus::DoSliderWithScaledValue(const void *pId, int *pOption, const CUIRect *pRect, const char *pStr, int Min, int Max, int Scale, const IScrollbarScale *pScale, unsigned Flags, const char *pSuffix)
 {
 	const bool NoClampValue = Flags & CUi::SCROLLBAR_OPTION_NOCLAMPVALUE;

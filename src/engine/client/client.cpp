@@ -6018,6 +6018,7 @@ void CClient::ShellUnregister()
 	if(Updated)
 		windows_shell_update();
 }
+
 #endif
 
 std::optional<int> CClient::ShowMessageBox(const IGraphics::CMessageBox &MessageBox)

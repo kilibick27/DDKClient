@@ -323,4 +323,16 @@ MACRO_CONFIG_INT(DdkPotatoSavedHighDetail, ddk_potato_saved_high_detail, 1, 0, 1
 MACRO_CONFIG_INT(DdkAutoFollowNearest, ddk_auto_follow_nearest, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto Follow Nearest toggle")
 MACRO_CONFIG_INT(DdkFlyAimHelper, ddk_fly_aim_helper, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Fly Aim Helper toggle")
 
+// DDK AimHelper (auto aim hook extras)
+MACRO_CONFIG_INT(DdkAutoHammer, ddk_auto_hammer, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hammer enemies in range (skips frozen)")
+MACRO_CONFIG_INT(DdkAutoHammerRange, ddk_auto_hammer_range, 64, 16, 96, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hammer max center-to-center distance in px (real server reach is ~35px)")
+MACRO_CONFIG_INT(DdkAutoHammerFast, ddk_auto_hammer_fast, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hammer fast fire (spam hammer every tick)")
+MACRO_CONFIG_INT(DdkAutoHammerSkipFrozen, ddk_auto_hammer_skip_frozen, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hammer skips already-frozen tees (off = hammer them too)")
+MACRO_CONFIG_INT(DdkAutoHammerHitFriends, ddk_auto_hammer_hit_friends, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hammer also hits friends")
+MACRO_CONFIG_INT(DdkHookFriendsOnly, ddk_hook_friends_only, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hook only friends")
+MACRO_CONFIG_INT(DdkHookNoFriends, ddk_hook_no_friends, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Never auto hook friends")
+MACRO_CONFIG_INT(DdkHookFriendPriority, ddk_hook_friend_priority, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Prioritize hooking frozen friends in range")
+MACRO_CONFIG_INT(DdkHookSilent, ddk_hook_silent, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hook turns toward its target smoothly instead of snapping instantly")
+MACRO_CONFIG_INT(DdkHookAccuracy, ddk_hook_accuracy, 100, 0, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hook aim accuracy percent (lower adds random imprecision)")
+
 

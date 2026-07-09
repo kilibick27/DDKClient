@@ -66,6 +66,8 @@ public:
 	bool DoEditBoxWithLabel(CLineInput *LineInput, const CUIRect *pRect, const char *pLabel, const char *pDefault, char *pBuf, size_t BufSize);
 	bool DoLine_RadioMenu(CUIRect &View, const char *pLabel, std::vector<CButtonContainer> &vButtonContainers, const std::vector<const char *> &vLabels, const std::vector<int> &vValues, int &Value);
 	bool DoLine_KeyReader(CUIRect &View, CButtonContainer &ReaderButton, CButtonContainer &ClearButton, const char *pName, const char *pCommand);
+	// Renders only a key reader (bind/unbind) for a command into the given rect, without a label.
+	bool DoKeyReaderForCommand(const CUIRect *pRect, CButtonContainer &ReaderButton, CButtonContainer &ClearButton, const char *pCommand);
 	IGraphics *MenuGraphics() const { return Graphics(); }
 	IStorage *MenuStorage() const { return Storage(); }
 	CGameClient *MenuGameClient() const { return GameClient(); }

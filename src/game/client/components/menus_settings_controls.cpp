@@ -99,7 +99,6 @@ void CMenusSettingsControls::OnInterfacesInit(CGameClient *pClient)
 		{EBindOptionGroup::MOVEMENT, Localizable("Move right"), "+right"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Jump"), "+jump"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Auto follow nearest"), "toggle cl_auto_follow 0 1"},
-		{EBindOptionGroup::MOVEMENT, Localizable("Auto aim hook"), "toggle cl_auto_aim 0 1"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Fire"), "+fire"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Hook"), "+hook"},
 		{EBindOptionGroup::MOVEMENT, Localizable("Hook collisions"), "+showhookcoll"},

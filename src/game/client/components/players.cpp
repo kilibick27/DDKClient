@@ -1115,6 +1115,33 @@ void CPlayers::RenderPlayer(
 		Graphics()->QuadsEnd();
 	}
 
+	// Auto aim hook FOV: two white lines showing the catch cone (cl_auto_aim_fov degrees total,
+	// so ±fov/2 to each side of the crosshair) up to the hook range.
+	if(g_Config.m_ClAutoAim &&
+		ClientId >= 0 &&
+		!GameClient()->m_Snap.m_SpecInfo.m_Active &&
+		ClientId == GameClient()->m_aLocalIds[g_Config.m_ClDummy])
+	{
+		vec2 AimDir = GameClient()->m_Controls.m_aMousePos[g_Config.m_ClDummy];
+		if(length(AimDir) > 0.001f)
+		{
+			AimDir = normalize(AimDir);
+			const float HalfAngle = g_Config.m_ClAutoAimFov / 2.0f; // degrees to each side
+			const float Range = CControls::ms_AutoAimHookRange;
+			const vec2 LeftEnd = Position + rotate(AimDir, -HalfAngle) * Range;
+			const vec2 RightEnd = Position + rotate(AimDir, HalfAngle) * Range;
+
+			Graphics()->TextureClear();
+			Graphics()->LinesBegin();
+			Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+			const IGraphics::CLineItem aFovLines[2] = {
+				IGraphics::CLineItem(Position.x, Position.y, LeftEnd.x, LeftEnd.y),
+				IGraphics::CLineItem(Position.x, Position.y, RightEnd.x, RightEnd.y)};
+			Graphics()->LinesDraw(aFovLines, 2);
+			Graphics()->LinesEnd();
+		}
+	}
+
 	float TeeAnimScale, TeeBaseSize;
 	CRenderTools::GetRenderTeeAnimScaleAndBaseSize(&RenderInfo, TeeAnimScale, TeeBaseSize);
 	vec2 BodyPos = Position + vec2(State.GetBody()->m_X, State.GetBody()->m_Y) * TeeAnimScale;

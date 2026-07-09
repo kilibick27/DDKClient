@@ -3167,7 +3167,125 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 		// Sub-tab content
 		if(s_DdkTab == DDK_TAB_AIM_HELPER)
 		{
-			// intentionally empty
+			// AimHelper: Auto aim hook. Expanding block: checkbox + key bind on the header row,
+			// FOV slider revealed when enabled (degrees, full cone; 90 = 45 to each side).
+			static float s_AimPhase = 0.0f;
+			const bool AimEnabled = g_Config.m_ClAutoAim != 0;
+			if(g_Config.m_BcModuleUiRevealAnimation)
+				BCUiAnimations::UpdatePhase(s_AimPhase, AimEnabled ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+			else
+				s_AimPhase = AimEnabled ? 1.0f : 0.0f;
+
+			// Expanded content: FOV slider + 3 friend hook mode toggles + Silent + Edge + Accuracy slider.
+			const float AimExpandTargetH = MarginSmall + LineSize * 7.0f;
+			const float AimExpandH = AimExpandTargetH * s_AimPhase;
+			const float AimBlockH = LineSize + MarginSmall + AimExpandH + MarginSmall;
+
+			CUIRect AimBlock, AimRow, LeftCol;
+			// Keep this block on the left half of the screen.
+			MainView.VSplitMid(&LeftCol, nullptr, MarginSmall);
+			LeftCol.HSplitTop(AimBlockH, &AimBlock, nullptr);
+			MainView.HSplitTop(AimBlockH, nullptr, &MainView);
+			AimBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+			AimBlock.Margin(MarginSmall, &AimBlock);
+
+			// Header row: checkbox on the left, key bind reader on the right
+			AimBlock.HSplitTop(LineSize, &AimRow, &AimBlock);
+			CUIRect AimToggle, AimBind;
+			AimRow.VSplitRight(90.0f, &AimToggle, &AimBind);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClAutoAim, Localize("Auto aim hook"), &g_Config.m_ClAutoAim, &AimToggle, LineSize);
+			static CButtonContainer s_AimBindReader, s_AimBindClear;
+			DoKeyReaderForCommand(&AimBind, s_AimBindReader, s_AimBindClear, "toggle cl_auto_aim 0 1");
+
+			// Expanded content: FOV slider
+			if(AimExpandH > 0.0f)
+			{
+				CUIRect Clip = {AimBlock.x, AimBlock.y, AimBlock.w, AimExpandH};
+				Ui()->ClipEnable(&Clip);
+				struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+				CUIRect E = {AimBlock.x, AimBlock.y, AimBlock.w, AimExpandTargetH};
+				E.HSplitTop(MarginSmall, nullptr, &E);
+				CUIRect SliderRow;
+				E.HSplitTop(LineSize, &SliderRow, &E);
+				Ui()->DoScrollbarOption(&g_Config.m_ClAutoAimFov, &g_Config.m_ClAutoAimFov, &SliderRow, Localize("Aim FOV (degrees)"), 10, 360, &CUi::ms_LinearScrollbarScale, 0, "");
+
+				// Friend hook modes. "Hook Friends Only" and "Don't Hook Friends" are mutually
+				// exclusive: enabling one clears the other so they never fight in the hook logic.
+				if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookFriendsOnly, Localize("Hook Friends Only"), &g_Config.m_DdkHookFriendsOnly, &E, LineSize) && g_Config.m_DdkHookFriendsOnly)
+					g_Config.m_DdkHookNoFriends = 0;
+				if(DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookNoFriends, Localize("Don't Hook Friends"), &g_Config.m_DdkHookNoFriends, &E, LineSize) && g_Config.m_DdkHookNoFriends)
+					g_Config.m_DdkHookFriendsOnly = 0;
+
+				// Priority: still hook frozen friends in range (to unfreeze them), even under "Don't Hook Friends".
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookFriendPriority, Localize("Priority: Frozen Friends"), &g_Config.m_DdkHookFriendPriority, &E, LineSize);
+
+				// Silent: turn toward the target gradually instead of snapping instantly.
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookSilent, Localize("Silent"), &g_Config.m_DdkHookSilent, &E, LineSize);
+
+				// Accuracy: random aim imprecision, lower value means more misses.
+				CUIRect SliderRow2;
+				E.HSplitTop(LineSize, &SliderRow2, &E);
+				Ui()->DoScrollbarOption(&g_Config.m_DdkHookAccuracy, &g_Config.m_DdkHookAccuracy, &SliderRow2, Localize("Accuracy %"), 0, 100, &CUi::ms_LinearScrollbarScale, 0, "");
+			}
+
+			MainView.HSplitTop(MarginSmall, nullptr, &MainView);
+
+			// Separate Auto Hammer expanding block below the auto aim hook block. Melees the nearest
+			// enemy in range; yields aim to the hook. Header row: checkbox + key bind. When enabled it
+			// expands to reveal the range slider, fast-fire toggle and friend/frozen filters.
+			{
+				static float s_HammerPhase = 0.0f;
+				const bool HammerEnabled = g_Config.m_DdkAutoHammer != 0;
+				if(g_Config.m_BcModuleUiRevealAnimation)
+					BCUiAnimations::UpdatePhase(s_HammerPhase, HammerEnabled ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+				else
+					s_HammerPhase = HammerEnabled ? 1.0f : 0.0f;
+
+				// Expanded content: range slider + fast-fire + skip-frozen + hit-friends (4 rows).
+				const float HammerExpandTargetH = MarginSmall + LineSize * 4.0f;
+				const float HammerExpandH = HammerExpandTargetH * s_HammerPhase;
+				const float HammerBlockH = LineSize + MarginSmall + HammerExpandH + MarginSmall;
+
+				CUIRect HammerBlock, HammerRow, HammerCol;
+				MainView.VSplitMid(&HammerCol, nullptr, MarginSmall);
+				HammerCol.HSplitTop(HammerBlockH, &HammerBlock, nullptr);
+				MainView.HSplitTop(HammerBlockH, nullptr, &MainView);
+				HammerBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+				HammerBlock.Margin(MarginSmall, &HammerBlock);
+
+				// Header row: checkbox on the left, key bind reader on the right.
+				HammerBlock.HSplitTop(LineSize, &HammerRow, &HammerBlock);
+				CUIRect HammerToggle, HammerBind;
+				HammerRow.VSplitRight(90.0f, &HammerToggle, &HammerBind);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkAutoHammer, Localize("Auto Hammer"), &g_Config.m_DdkAutoHammer, &HammerToggle, LineSize);
+				static CButtonContainer s_HammerBindReader, s_HammerBindClear;
+				DoKeyReaderForCommand(&HammerBind, s_HammerBindReader, s_HammerBindClear, "toggle ddk_auto_hammer 0 1");
+
+				// Expanded content.
+				if(HammerExpandH > 0.0f)
+				{
+					CUIRect Clip = {HammerBlock.x, HammerBlock.y, HammerBlock.w, HammerExpandH};
+					Ui()->ClipEnable(&Clip);
+					struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+					CUIRect E = {HammerBlock.x, HammerBlock.y, HammerBlock.w, HammerExpandTargetH};
+					E.HSplitTop(MarginSmall, nullptr, &E);
+
+					// Range slider (center-to-center px). Real server reach when aimed straight is
+					// ~35px; higher values just start the swing earlier as you approach.
+					CUIRect SliderRow;
+					E.HSplitTop(LineSize, &SliderRow, &E);
+					Ui()->DoScrollbarOption(&g_Config.m_DdkAutoHammerRange, &g_Config.m_DdkAutoHammerRange, &SliderRow, Localize("Hammer Range (px)"), 16, 96, &CUi::ms_LinearScrollbarScale, 0, "");
+
+					// Fast hammer: spam a press every tick.
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkAutoHammerFast, Localize("Fast Hammer"), &g_Config.m_DdkAutoHammerFast, &E, LineSize);
+					// Skip frozen tees (off = hammer them too).
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkAutoHammerSkipFrozen, Localize("Skip Frozen Tees"), &g_Config.m_DdkAutoHammerSkipFrozen, &E, LineSize);
+					// Also hit friends.
+					DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkAutoHammerHitFriends, Localize("Hit Friends"), &g_Config.m_DdkAutoHammerHitFriends, &E, LineSize);
+				}
+
+				MainView.HSplitTop(MarginSmall, nullptr, &MainView);
+			}
 		}
 		else if(s_DdkTab == DDK_TAB_FLY_HELPER)
 		{

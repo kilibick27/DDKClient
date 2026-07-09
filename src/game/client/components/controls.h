@@ -25,9 +25,22 @@ public:
 		AUTOMATED,
 	};
 
+	// Auto aim hook: shared hook range used by both the catch logic (CControls) and the
+	// FOV rendering (CPlayers). The cone half-angle comes from cl_auto_aim_fov / 2.
+	static constexpr float ms_AutoAimHookRange = 375.0f;
+
+	// DDK Auto Hammer: default max center-to-center distance (px) at which a tee is considered
+	// within hammer reach. The live value is configurable via ddk_auto_hammer_range. Server hammer
+	// reach when aimed straight at a tee is ~35px (ProjStartPos 21px ahead + 14px hit radius).
+	static constexpr float ms_AutoHammerRange = 64.0f;
+
 	vec2 m_aMousePos[NUM_DUMMIES];
 	vec2 m_aMousePosOnAction[NUM_DUMMIES];
 	vec2 m_aTargetPos[NUM_DUMMIES];
+
+	// DDK Auto Aim Hook "Silent" mode: current smoothed aim direction, turned toward the target
+	// by a limited rate per tick instead of snapping. (0, 0) means "not yet seeded".
+	vec2 m_aAutoAimSmoothDir[NUM_DUMMIES];
 
 	EMouseInputType m_aMouseInputType[NUM_DUMMIES];
 
@@ -52,6 +65,7 @@ public:
 	int m_aSnapTapPrevRight[NUM_DUMMIES];
 	int m_AutoFollowTargetId;
 	int m_DummyAutoHookTargetId;
+	int m_AutoHammerLastFireTick;
 
 	CControls();
 	int Sizeof() const override { return sizeof(*this); }

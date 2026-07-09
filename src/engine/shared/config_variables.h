@@ -255,7 +255,8 @@ MACRO_CONFIG_INT(ClDummyCopyMovesWithHammer, cl_dummy_copy_moves_with_hammer, 0,
 MACRO_CONFIG_INT(ClDummyDeepfly, cl_dummy_deepfly, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "Deepfly mode: when you hit dummy, it immediately hits you back once")
 MACRO_CONFIG_INT(ClDummyAutoHook, cl_dummy_auto_hook, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "Dummy automatically hooks nearest tee (only works with copy moves enabled)")
 MACRO_CONFIG_INT(ClAutoFollow, cl_auto_follow, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_INSENSITIVE, "Automatically follow nearest tee")
-MACRO_CONFIG_INT(ClAutoAim, cl_auto_aim, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "Auto aim hook to nearest player within 90 degrees")
+MACRO_CONFIG_INT(ClAutoAim, cl_auto_aim, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "Auto aim hook to nearest player within cl_auto_aim_fov degrees")
+MACRO_CONFIG_INT(ClAutoAimFov, cl_auto_aim_fov, 90, 10, 360, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "Auto aim hook FOV cone in degrees (drawn as two white lines)")
 
 // more controllable dummy command
 MACRO_CONFIG_INT(ClDummyControl, cl_dummy_control, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_INSENSITIVE, "Whether you can control dummy at the same time (cl_dummy_jump, cl_dummy_fire, cl_dummy_hook)")
