@@ -19,6 +19,7 @@
 #include <game/collision.h>
 #include <game/gamecore.h>
 
+#include <algorithm>
 #include <cmath>
 
 CControls::CControls()
@@ -36,7 +37,8 @@ CControls::CControls()
 	std::fill(std::begin(m_aMouseInputType), std::end(m_aMouseInputType), EMouseInputType::ABSOLUTE);
 	m_AutoFollowTargetId = -1;
 	m_DummyAutoHookTargetId = -1;
-	m_AutoHammerLastFireTick = 0;
+	std::fill(std::begin(m_aAutoHammerLastFireTick), std::end(m_aAutoHammerLastFireTick), 0);
+	m_AutoAimHookTargetId = -1;
 }
 
 void CControls::OnReset()
@@ -417,7 +419,10 @@ int CControls::SnapInput(int *pData)
 		// of where the tee is flying. Any tee whose hook line is blocked by tiles is skipped, so the
 		// helper falls through to the nearest tee that is actually reachable. If no tee is reachable,
 		// the aim is left untouched (you hook wherever you are looking, no auto-aim).
-		if(g_Config.m_ClAutoAim && m_aInputData[g_Config.m_ClDummy].m_Hook)
+		// Target selection (and the Visuals highlight) run continuously while cl_auto_aim is on, so
+		// the AimHelper Visuals block can show who is about to get hooked before the hook button is
+		// even pressed; only the actual input redirection below is gated on the hook being held.
+		if(g_Config.m_ClAutoAim)
 		{
 			int LocalClientId = GameClient()->m_Snap.m_LocalClientId;
 			if(LocalClientId >= 0 && GameClient()->m_Snap.m_pLocalCharacter)
@@ -429,6 +434,7 @@ int CControls::SnapInput(int *pData)
 
 				float MinDistance = -1.0f;
 				vec2 BestTarget;
+				int BestTargetId = -1;
 				bool FoundTarget = false;
 
 				// Frozen-friend priority tier: when ddk_hook_friend_priority is on, any frozen
@@ -436,6 +442,7 @@ int CControls::SnapInput(int *pData)
 				// hook goes to unfreeze a teammate first.
 				float MinFriendDistance = -1.0f;
 				vec2 BestFriendTarget;
+				int BestFriendTargetId = -1;
 				bool FoundFriendTarget = false;
 
 				const float MaxHookRange = ms_AutoAimHookRange;
@@ -449,13 +456,124 @@ int CControls::SnapInput(int *pData)
 				// tee) and alternates outward left/right around the circle, so the first reachable point
 				// found is always the nearest possible part of the tee, letting the hook reach around a
 				// corner block that only covers the tee's near side.
-				auto FindHookableHitboxPoint = [this](vec2 From, vec2 Center, vec2 *pOutRelative) -> bool {
+				// Two solid tiles placed diagonally opposite each other in a 2x2 block (e.g. top-left
+				// and bottom-right solid, the other diagonal empty) only truly touch at one corner
+				// point, leaving a pixel-precise gap a hook can thread through even though the angular
+				// sweep above won't find it (it only tries offsets around the tee's hitbox, not along
+				// the blocking tiles). Aims THROUGH the gap rather than at it: the candidate direction
+				// is extended past the corner and only accepted if it also comes within hook-grab
+				// range of the tee on the other side, so the hook actually reaches the target instead
+				// of just poking into the empty tile next to the corner.
+				auto FindDiagonalHookGap = [this](vec2 From, vec2 To, vec2 *pOutRelative) -> bool {
+					const int Tile = 32;
+					const int MinX = std::min(From.x, To.x) / Tile - 1;
+					const int MaxX = std::max(From.x, To.x) / Tile + 1;
+					const int MinY = std::min(From.y, To.y) / Tile - 1;
+					const int MaxY = std::max(From.y, To.y) / Tile + 1;
+
+					const float GrabRadius = CCharacterCore::PhysicalSize();
+					const float ToDist = length(To - From);
+
+					struct SCorner { int i, j; float DistSq; };
+					static SCorner s_aCorners[200];
+					int NumCandidates = 0;
+					for(int i = MinX; i <= MaxX && NumCandidates < 200; i++)
+					{
+						for(int j = MinY; j <= MaxY && NumCandidates < 200; j++)
+						{
+							const float dx = (float)(i * Tile) - From.x;
+							const float dy = (float)(j * Tile) - From.y;
+							s_aCorners[NumCandidates++] = {i, j, dx * dx + dy * dy};
+						}
+					}
+
+					// Nearest corners first so the closest usable gap wins.
+					std::sort(s_aCorners, s_aCorners + NumCandidates, [](const SCorner &a, const SCorner &b) { return a.DistSq < b.DistSq; });
+
+					for(int k = 0; k < NumCandidates; k++)
+					{
+						const float Cx = (float)(s_aCorners[k].i * Tile);
+						const float Cy = (float)(s_aCorners[k].j * Tile);
+
+						const bool Tl = Collision()->IsSolid((int)(Cx - Tile / 2), (int)(Cy - Tile / 2));
+						const bool Tr = Collision()->IsSolid((int)(Cx + Tile / 2), (int)(Cy - Tile / 2));
+						const bool Bl = Collision()->IsSolid((int)(Cx - Tile / 2), (int)(Cy + Tile / 2));
+						const bool Br = Collision()->IsSolid((int)(Cx + Tile / 2), (int)(Cy + Tile / 2));
+
+						const bool DiagNwSe = Tl && Br && !Tr && !Bl;
+						const bool DiagNeSw = Tr && Bl && !Tl && !Br;
+						if(!DiagNwSe && !DiagNeSw)
+							continue;
+
+						// Walk the offset from the corner outward, pixel by pixel, on both sides of the
+						// gap. Neighboring solid tiles beyond this immediate 2x2 block can narrow the
+						// actually-usable gap well below a full tile, so the nearest working pixel to
+						// the corner isn't always a fixed distance away — keep trying until one clears.
+						const float MaxOffset = 14.0f;
+						for(float Off = 1.0f; Off <= MaxOffset; Off += 1.0f)
+						{
+							vec2 aGapPoints[2];
+							if(DiagNwSe)
+							{
+								aGapPoints[0] = vec2(Cx + Off, Cy - Off);
+								aGapPoints[1] = vec2(Cx - Off, Cy + Off);
+							}
+							else
+							{
+								aGapPoints[0] = vec2(Cx - Off, Cy - Off);
+								aGapPoints[1] = vec2(Cx + Off, Cy + Off);
+							}
+
+							for(vec2 GapPoint : aGapPoints)
+							{
+								const vec2 GapVec = GapPoint - From;
+								const float GapDist = length(GapVec);
+								if(GapDist < 1.0f)
+									continue;
+								const vec2 Dir = GapVec / GapDist;
+
+								// Where along this ray does it pass closest to the tee, and how close does
+								// it get? The gap has to lie before that point, not past it or behind us.
+								const float ClosestT = dot(To - From, Dir);
+								if(ClosestT < GapDist)
+									continue;
+								const vec2 ClosestPoint = From + Dir * ClosestT;
+								if(distance(ClosestPoint, To) > GrabRadius)
+									continue;
+
+								// Aim a bit past the closest-approach point so the hook's flight line
+								// actually reaches in that close to the tee, not just up to the gap.
+								const vec2 AimPoint = From + Dir * std::min(ClosestT + GrabRadius, ToDist + GrabRadius);
+								if(!Collision()->IntersectLineTeleHook(From, AimPoint, nullptr, nullptr))
+								{
+									*pOutRelative = AimPoint - From;
+									return true;
+								}
+							}
+						}
+					}
+					return false;
+				};
+
+				auto FindHookableHitboxPoint = [this, &FindDiagonalHookGap](vec2 From, vec2 Center, vec2 *pOutRelative) -> bool {
 					const vec2 ToCenter = Center - From;
 					const float CenterDist = length(ToCenter);
 					// Too close for a hitbox-radius offset to make sense; aim straight at the center.
 					if(CenterDist <= CCharacterCore::PhysicalSize())
 					{
-						if(Collision()->IntersectLine(From, Center, nullptr, nullptr))
+						if(Collision()->IntersectLineTeleHook(From, Center, nullptr, nullptr))
+							return false;
+						*pOutRelative = ToCenter;
+						return true;
+					}
+
+					// Edge Scan off: just try a straight shot to the center at any range, no
+					// hitbox-edge sweep or diagonal-gap search. Without this, turning Edge Scan off
+					// would leave only the "too close" case above able to find a target, so the hook
+					// would stop aiming almost entirely instead of falling back to plain center-aim.
+					if(!g_Config.m_DdkHookEdgeScan)
+					{
+						if(Collision()->IntersectLineTeleHook(From, Center, nullptr, nullptr))
 							return false;
 						*pOutRelative = ToCenter;
 						return true;
@@ -470,13 +588,17 @@ int CControls::SnapInput(int *pData)
 					{
 						const vec2 EdgeDir = OffsetDeg == 0.0f ? NearDir : rotate(NearDir, OffsetDeg);
 						const vec2 Candidate = Center - EdgeDir * Radius;
-						if(!Collision()->IntersectLine(From, Candidate, nullptr, nullptr))
+						if(!Collision()->IntersectLineTeleHook(From, Candidate, nullptr, nullptr))
 						{
 							*pOutRelative = Candidate - From;
 							return true;
 						}
 					}
-					return false;
+
+					// Diagonal gap: two solid tiles touching only at one corner (e.g. top-left +
+					// bottom-right solid) leave a pixel-precise gap the sweep above won't find, since
+					// it only tries offsets around the tee's hitbox, not along the blocking tiles.
+					return FindDiagonalHookGap(From, Center, pOutRelative);
 				};
 
 				for(int i = 0; i < MAX_CLIENTS; i++)
@@ -556,22 +678,36 @@ int CControls::SnapInput(int *pData)
 					{
 						MinDistance = Distance;
 						BestTarget = EdgeTarget;
+						BestTargetId = i;
 						FoundTarget = true;
 					}
 					if(FrozenFriendPriority && (MinFriendDistance < 0.0f || Distance < MinFriendDistance))
 					{
 						MinFriendDistance = Distance;
 						BestFriendTarget = EdgeTarget;
+						BestFriendTargetId = i;
 						FoundFriendTarget = true;
 					}
 				}
 				// Frozen friends win over the plain nearest tee when priority mode is enabled.
 				bool HaveTarget = FoundFriendTarget || FoundTarget;
 				vec2 ChosenTarget = FoundFriendTarget ? BestFriendTarget : BestTarget;
+				// DDK AimHelper Visuals: remember which tee is actually being targeted this tick
+				// so CPlayers can outline/fill its hitbox.
+				m_AutoAimHookTargetId = HaveTarget ? (FoundFriendTarget ? BestFriendTargetId : BestTargetId) : -1;
 
-				if(HaveTarget)
+				// Track hook-button rising edges so Silent mode (below) can tell a fresh press from
+				// a continued hold, regardless of whether a target is currently available.
+				const int Dummy = g_Config.m_ClDummy;
+				const bool HookHeldNow = m_aInputData[Dummy].m_Hook != 0;
+				const bool HookJustPressed = HookHeldNow && !m_aAutoAimHookWasHeld[Dummy];
+				m_aAutoAimHookWasHeld[Dummy] = HookHeldNow;
+
+				// Input redirection only applies while the hook button is actually held, so aiming
+				// around normally never gets your view snapped; the Visuals highlight above already
+				// reflects the target regardless of hook state.
+				if(HaveTarget && HookHeldNow)
 				{
-					const int Dummy = g_Config.m_ClDummy;
 					const float ChosenLen = length(ChosenTarget);
 
 					// Accuracy: rotate the aim vector by a random angle that grows as accuracy drops,
@@ -589,13 +725,17 @@ int CControls::SnapInput(int *pData)
 					if(g_Config.m_DdkHookSilent)
 					{
 						vec2 &SmoothDir = m_aAutoAimSmoothDir[Dummy];
-						if(SmoothDir.x == 0.0f && SmoothDir.y == 0.0f)
+						// A fresh hook press always snaps straight to the target instead of turning
+						// from whatever direction was left over from a previous, unrelated press -
+						// otherwise the first tick or two of every press aims short of the real
+						// target and the hook misses.
+						if((SmoothDir.x == 0.0f && SmoothDir.y == 0.0f) || HookJustPressed)
 						{
 							SmoothDir = ChosenTarget;
 						}
 						else
 						{
-							const float SilentTurnDegPerTick = 12.0f;
+							const float SilentTurnDegPerTick = 45.0f;
 							const float MaxTurn = SilentTurnDegPerTick * pi / 180.0f;
 							const float FromAngle = angle(SmoothDir);
 							const float ToAngle = angle(ChosenTarget);
@@ -605,6 +745,14 @@ int CControls::SnapInput(int *pData)
 							SmoothDir = direction(FromAngle + DeltaAngle) * (NewLen > 0.0f ? NewLen : ChosenLen);
 						}
 						ChosenTarget = SmoothDir;
+
+						// Stretch the aim vector out to the normal max mouse-reach distance instead of
+						// stopping exactly at the tee. Only the angle matters for aiming/hooking, so
+						// this makes the sent cursor position look like an ordinary full-reach mouse
+						// aim instead of a suspiciously short vector landing exactly on the target.
+						const float SilentLen = length(ChosenTarget);
+						if(SilentLen > 0.0f)
+							ChosenTarget = ChosenTarget / SilentLen * GetMaxMouseDistance();
 					}
 					else
 					{
@@ -617,18 +765,55 @@ int CControls::SnapInput(int *pData)
 					m_aInputData[Dummy].m_TargetY = (int)ChosenTarget.y;
 				}
 				// A (0,0) target is interpreted by the game as aiming straight up; nudge X so the
-				// hook keeps pointing at the tee instead of snapping vertical.
-				if(HaveTarget &&
+				// hook keeps pointing at the tee instead of snapping vertical. Only applies while
+				// actually redirecting input, same gating as the block above.
+				if(HaveTarget && m_aInputData[g_Config.m_ClDummy].m_Hook &&
 					!m_aInputData[g_Config.m_ClDummy].m_TargetX && !m_aInputData[g_Config.m_ClDummy].m_TargetY)
 					m_aInputData[g_Config.m_ClDummy].m_TargetX = 1;
 			}
+			else
+			{
+				// No local character to aim from: nothing to highlight.
+				m_AutoAimHookTargetId = -1;
+			}
+		}
+		else
+		{
+			// Auto aim off: no target is being actively selected or highlighted.
+			m_AutoAimHookTargetId = -1;
 		}
 
+		// Fast Hammer: while the player is physically holding fire themselves, hit fast at their own
+		// aim - this takes priority over DDK Auto Hammer's targeting below so a manual swing never
+		// gets redirected onto some other enemy mid-press. Releasing fire hands control back to Auto
+		// Hammer's own targeting (if enabled), which finds and swings at nearby enemies per its own
+		// settings below - it just never fires blindly at empty air with no target in range.
+		bool DdkHammerFireHeldManually = (m_aInputData[g_Config.m_ClDummy].m_Fire & 1) != 0 &&
+			GameClient()->m_Snap.m_pLocalCharacter &&
+			GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_HAMMER;
+
+		if(g_Config.m_DdkAutoHammerFast && DdkHammerFireHeldManually)
+		{
+			// Just re-trigger a fresh counted press every tick at the current aim. The hammer isn't
+			// full-auto server-side, so a plain hold would otherwise only swing once (see
+			// HandleWeapons/CountInput). Bumping the fire counter by 2 preserves the held parity
+			// while registering exactly one fresh press per tick.
+			// Use the predicted tick (not the last-acked snapshot tick): this function runs once per
+			// predicted-tick advance, but the acked tick only moves when a snapshot actually arrives,
+			// so any latency hiccup would stall it for multiple predicted ticks and silently drop
+			// swings.
+			const int Now = Client()->PredGameTick(g_Config.m_ClDummy);
+			if(Now - m_aFastHammerLastFireTick[g_Config.m_ClDummy] >= 1)
+			{
+				m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 2) & INPUT_STATE_MASK;
+				m_aFastHammerLastFireTick[g_Config.m_ClDummy] = Now;
+			}
+		}
 		// DDK Auto Hammer: hammer the nearest enemy within melee reach. Friend/frozen filtering is
 		// configurable. The targeted swing (which redirects aim and switches to hammer) only runs
-		// while the hook is NOT held, so it never disturbs a hook. Fast Hammer, however, keeps
-		// spamming the hammer even while hooking or performing any other action.
-		if(g_Config.m_DdkAutoHammer)
+		// while the hook is NOT held, so it never disturbs a hook. Runs whenever fire isn't being
+		// held manually (or Fast Hammer is off), so releasing fire falls back to auto-targeting.
+		else if(g_Config.m_DdkAutoHammer)
 		{
 			int LocalClientId = GameClient()->m_Snap.m_LocalClientId;
 			if(LocalClientId >= 0 && GameClient()->m_Snap.m_pLocalCharacter)
@@ -684,28 +869,19 @@ int CControls::SnapInput(int *pData)
 					// fire counter by 2 registers exactly one press (see CountInput) while preserving
 					// parity, so it never corrupts the real fire-key state. Only fire once the weapon
 					// has actually switched to hammer.
-					// Fast hammer: bump one counted press every tick for maximum spam; otherwise
-					// rate-limit to roughly the server hammer fire delay.
+					// Fast hammer: once a real target is found in range, bump one counted press every
+					// tick for maximum spam against it; otherwise rate-limit to the server fire delay.
+					// (There's no fallback for "no target found" - that used to fire blindly every
+					// tick regardless of whether fire was held, which is exactly the bug this fixes.)
+					// Use the predicted tick, same reasoning as Fast Hammer above: the acked snapshot
+					// tick can stall across latency hiccups and silently starve the swing cooldown.
 					const int HammerCooldownTicks = g_Config.m_DdkAutoHammerFast ? 1 : maximum(1, Client()->GameTickSpeed() / 8);
-					const int Now = Client()->GameTick(g_Config.m_ClDummy);
-					if(Now - m_AutoHammerLastFireTick >= HammerCooldownTicks &&
+					const int Now = Client()->PredGameTick(g_Config.m_ClDummy);
+					if(Now - m_aAutoHammerLastFireTick[g_Config.m_ClDummy] >= HammerCooldownTicks &&
 						GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_HAMMER)
 					{
 						m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 2) & INPUT_STATE_MASK;
-						m_AutoHammerLastFireTick = Now;
-					}
-				}
-				else if(g_Config.m_DdkAutoHammerFast &&
-					GameClient()->m_Snap.m_pLocalCharacter->m_Weapon == WEAPON_HAMMER)
-				{
-					// Fast hammer with no target in range: just keep swinging the hammer as fast as
-					// possible (one counted press per tick) at the current aim, without redirecting it.
-					// Only while the hammer is actually the active weapon, so it never spams other guns.
-					const int Now = Client()->GameTick(g_Config.m_ClDummy);
-					if(Now - m_AutoHammerLastFireTick >= 1)
-					{
-						m_aInputData[g_Config.m_ClDummy].m_Fire = (m_aInputData[g_Config.m_ClDummy].m_Fire + 2) & INPUT_STATE_MASK;
-						m_AutoHammerLastFireTick = Now;
+						m_aAutoHammerLastFireTick[g_Config.m_ClDummy] = Now;
 					}
 				}
 			}

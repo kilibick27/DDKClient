@@ -41,6 +41,10 @@ public:
 	// DDK Auto Aim Hook "Silent" mode: current smoothed aim direction, turned toward the target
 	// by a limited rate per tick instead of snapping. (0, 0) means "not yet seeded".
 	vec2 m_aAutoAimSmoothDir[NUM_DUMMIES];
+	// Whether the hook button was already held last tick, so a fresh press can reseed
+	// m_aAutoAimSmoothDir instantly instead of turning toward the new target from a stale
+	// direction left over from a previous, unrelated hook press.
+	bool m_aAutoAimHookWasHeld[NUM_DUMMIES] = {};
 
 	EMouseInputType m_aMouseInputType[NUM_DUMMIES];
 
@@ -65,7 +69,15 @@ public:
 	int m_aSnapTapPrevRight[NUM_DUMMIES];
 	int m_AutoFollowTargetId;
 	int m_DummyAutoHookTargetId;
-	int m_AutoHammerLastFireTick;
+	// DDK Auto Hammer: last predicted tick a synthetic press was injected, per dummy so switching
+	// dummies doesn't reset/share the cooldown.
+	int m_aAutoHammerLastFireTick[NUM_DUMMIES] = {};
+	// Fast Hammer (manual hold): last predicted tick a synthetic press was injected while the
+	// player held fire themselves, per dummy so switching dummies doesn't reset/share the cooldown.
+	int m_aFastHammerLastFireTick[NUM_DUMMIES] = {};
+
+	// DDK AimHelper Visuals: ClientId of the tee the auto hook is currently targeting, -1 if none.
+	int m_AutoAimHookTargetId = -1;
 
 	CControls();
 	int Sizeof() const override { return sizeof(*this); }

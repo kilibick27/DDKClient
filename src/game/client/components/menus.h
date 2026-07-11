@@ -23,6 +23,7 @@
 #include <game/client/components/menus_start.h>
 #include <game/client/components/skins7.h>
 #include <game/client/components/tclient/warlist.h>
+#include <game/client/components/youtube_shorts_capture.h>
 #include <game/client/lineinput.h>
 #include <game/client/ui.h>
 #include <game/voting.h>
@@ -1132,6 +1133,7 @@ public:
 
 private:
 	CCommunityIcons m_CommunityIcons;
+	CYoutubeShortsCapture m_YoutubeShortsCapture;
 	CMenusIngameTouchControls m_MenusIngameTouchControls;
 	friend CMenusIngameTouchControls;
 	CMenusSettingsControls m_MenusSettingsControls;

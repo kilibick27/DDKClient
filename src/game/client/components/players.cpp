@@ -1116,8 +1116,10 @@ void CPlayers::RenderPlayer(
 	}
 
 	// Auto aim hook FOV: two white lines showing the catch cone (cl_auto_aim_fov degrees total,
-	// so ±fov/2 to each side of the crosshair) up to the hook range.
+	// so ±fov/2 to each side of the crosshair) up to the hook range. Purely visual - gated on
+	// Draw Fov so it can be hidden without affecting the hook, which keeps using the FOV either way.
 	if(g_Config.m_ClAutoAim &&
+		g_Config.m_DdkHookDrawFov &&
 		ClientId >= 0 &&
 		!GameClient()->m_Snap.m_SpecInfo.m_Active &&
 		ClientId == GameClient()->m_aLocalIds[g_Config.m_ClDummy])
@@ -1139,6 +1141,57 @@ void CPlayers::RenderPlayer(
 				IGraphics::CLineItem(Position.x, Position.y, RightEnd.x, RightEnd.y)};
 			Graphics()->LinesDraw(aFovLines, 2);
 			Graphics()->LinesEnd();
+		}
+	}
+
+	// DDK AimHelper Visuals: highlight whichever tee the auto hook is currently locked onto.
+	// Both need cl_auto_aim on; Draw Glow works with or without Draw Box (falls back to the
+	// round hitbox shape when Draw Box is off).
+	if(g_Config.m_ClAutoAim &&
+		(g_Config.m_DdkHookDrawBox || g_Config.m_DdkHookDrawGlow) &&
+		ClientId >= 0 &&
+		!GameClient()->m_Snap.m_SpecInfo.m_Active &&
+		ClientId == GameClient()->m_Controls.m_AutoAimHookTargetId)
+	{
+		const float HitboxHalf = CCharacterCore::PhysicalSize();
+		// Draw Box is padded out past the hitbox and drawn as a thick quad frame instead of a
+		// hairline, since a 1px line at the exact hitbox edge was hard to spot in-game.
+		const float BoxHalf = HitboxHalf + 8.0f;
+		const float BoxThickness = 3.0f;
+
+		if(g_Config.m_DdkHookDrawGlow)
+		{
+			Graphics()->TextureClear();
+			Graphics()->QuadsBegin();
+			Graphics()->SetColor(1.0f, 0.0f, 0.0f, 0.5f);
+			if(g_Config.m_DdkHookDrawBox)
+			{
+				IGraphics::CQuadItem Quad(Position.x, Position.y, BoxHalf * 2.0f, BoxHalf * 2.0f);
+				Graphics()->QuadsDraw(&Quad, 1);
+			}
+			else
+			{
+				Graphics()->DrawCircle(Position.x, Position.y, HitboxHalf, 24);
+			}
+			Graphics()->QuadsEnd();
+		}
+
+		if(g_Config.m_DdkHookDrawBox)
+		{
+			Graphics()->TextureClear();
+			Graphics()->QuadsBegin();
+			Graphics()->SetColor(1.0f, 0.0f, 0.0f, 1.0f);
+			const float X0 = Position.x - BoxHalf, X1 = Position.x + BoxHalf;
+			const float Y0 = Position.y - BoxHalf, Y1 = Position.y + BoxHalf;
+			IGraphics::CQuadItem aBoxQuads[4] = {
+				// Top and bottom bars
+				IGraphics::CQuadItem((X0 + X1) * 0.5f, Y0, BoxHalf * 2.0f, BoxThickness),
+				IGraphics::CQuadItem((X0 + X1) * 0.5f, Y1, BoxHalf * 2.0f, BoxThickness),
+				// Left and right bars
+				IGraphics::CQuadItem(X0, (Y0 + Y1) * 0.5f, BoxThickness, BoxHalf * 2.0f),
+				IGraphics::CQuadItem(X1, (Y0 + Y1) * 0.5f, BoxThickness, BoxHalf * 2.0f)};
+			Graphics()->QuadsDraw(aBoxQuads, 4);
+			Graphics()->QuadsEnd();
 		}
 	}
 

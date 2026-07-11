@@ -951,6 +951,7 @@ void CMenus::OnInterfacesInit(CGameClient *pClient)
 	m_MenusSettingsControls.OnInterfacesInit(pClient);
 	m_MenusStart.OnInterfacesInit(pClient);
 	m_CommunityIcons.OnInterfacesInit(pClient);
+	m_YoutubeShortsCapture.OnInterfacesInit(pClient);
 }
 
 void CMenus::OnConsoleInit()
@@ -2993,6 +2994,7 @@ void CMenus::OnShutdown()
 	UnloadMenuSfx();
 	m_MenuMediaBackground.Shutdown();
 	m_CommunityIcons.Shutdown();
+	m_YoutubeShortsCapture.Shutdown();
 }
 
 bool CMenus::OnCursorMove(float x, float y, IInput::ECursorType CursorType)

@@ -2976,6 +2976,8 @@ if(CLIENT)
     components/touch_controls.h
     components/voting.cpp
     components/voting.h
+    components/youtube_shorts_capture.cpp
+    components/youtube_shorts_capture.h
     gameclient.cpp
     gameclient.h
     laser_data.cpp

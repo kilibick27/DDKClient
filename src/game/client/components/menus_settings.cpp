@@ -3138,11 +3138,12 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 			DDK_TAB_AVOID_HELPER,
 			DDK_TAB_SETTINGS,
 			DDK_TAB_TAS_HELPER,
+			DDK_TAB_YOUTUBE,
 			DDK_NUM_TABS,
 		};
 		static int s_DdkTab = 0;
 		const char *apDdkTabNames[DDK_NUM_TABS] = {
-			"AimHelper", "FlyHelper", "AvoidHelper", "Settings", "TASHelper"};
+			"AimHelper", "FlyHelper", "AvoidHelper", "Settings", "TASHelper", "YouTube"};
 
 		// Title
 		CUIRect TitleRect, TabBarDdk, BackRect;
@@ -3176,16 +3177,32 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 			else
 				s_AimPhase = AimEnabled ? 1.0f : 0.0f;
 
-			// Expanded content: FOV slider + 3 friend hook mode toggles + Silent + Edge + Accuracy slider.
+			// Expanded content: FOV slider + 3 friend hook mode toggles + Silent + Edge Scan + Accuracy slider.
 			const float AimExpandTargetH = MarginSmall + LineSize * 7.0f;
 			const float AimExpandH = AimExpandTargetH * s_AimPhase;
 			const float AimBlockH = LineSize + MarginSmall + AimExpandH + MarginSmall;
 
-			CUIRect AimBlock, AimRow, LeftCol;
+			CUIRect AimBlock, AimRow, LeftCol, RightCol;
 			// Keep this block on the left half of the screen.
-			MainView.VSplitMid(&LeftCol, nullptr, MarginSmall);
+			MainView.VSplitMid(&LeftCol, &RightCol, MarginSmall);
 			LeftCol.HSplitTop(AimBlockH, &AimBlock, nullptr);
-			MainView.HSplitTop(AimBlockH, nullptr, &MainView);
+
+			// Visuals: highlights whichever tee the auto hook is currently locked onto (red box
+			// outline / red glow fill). Static content, not an expanding block like Aim/Hammer:
+			// Draw Glow has to stay reachable on its own even while Draw Box is off, so nothing
+			// here can be hidden behind a single header toggle.
+			const float VisualsBlockH = MarginSmall + LineSize * 4.0f + MarginSmall;
+			CUIRect VisualsBlock, VisualsTitleRow;
+			RightCol.HSplitTop(VisualsBlockH, &VisualsBlock, nullptr);
+			VisualsBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+			VisualsBlock.Margin(MarginSmall, &VisualsBlock);
+			VisualsBlock.HSplitTop(LineSize, &VisualsTitleRow, &VisualsBlock);
+			Ui()->DoLabel(&VisualsTitleRow, Localize("Visuals"), 14.0f, TEXTALIGN_ML);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookDrawFov, Localize("Fov"), &g_Config.m_DdkHookDrawFov, &VisualsBlock, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookDrawBox, Localize("Draw Box"), &g_Config.m_DdkHookDrawBox, &VisualsBlock, LineSize);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookDrawGlow, Localize("Draw Glow"), &g_Config.m_DdkHookDrawGlow, &VisualsBlock, LineSize);
+
+			MainView.HSplitTop(maximum(AimBlockH, VisualsBlockH), nullptr, &MainView);
 			AimBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
 			AimBlock.Margin(MarginSmall, &AimBlock);
 
@@ -3221,6 +3238,10 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 
 				// Silent: turn toward the target gradually instead of snapping instantly.
 				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookSilent, Localize("Silent"), &g_Config.m_DdkHookSilent, &E, LineSize);
+
+				// Edge Scan: fall back to sweeping hitpoints around the target's hitbox when a
+				// straight hook shot is blocked, so hooks that graze an edge still connect.
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookEdgeScan, Localize("Edge Scan"), &g_Config.m_DdkHookEdgeScan, &E, LineSize);
 
 				// Accuracy: random aim imprecision, lower value means more misses.
 				CUIRect SliderRow2;
@@ -3403,6 +3424,111 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableChat,        "Disable Chat",            g_Config.m_ClShowChat,                  0, 1)
 				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableHighDetail,  "Disable High Detail",     g_Config.m_GfxHighDetail,               0, 1)
 				#undef POTATO_ITEM
+			}
+		}
+		else if(s_DdkTab == DDK_TAB_YOUTUBE)
+		{
+			// ── YouTube (Shorts viewer via browser window capture) ────────
+			// Header row: checkbox toggles the panel below. The expanded
+			// content shows a live capture of a browser window with YouTube
+			// open, with up/down buttons emulating mouse wheel scroll.
+			static float s_YoutubePhase = 0.0f;
+			const bool YoutubeEnabled = g_Config.m_DdkYoutubeShorts != 0;
+			if(g_Config.m_BcModuleUiRevealAnimation)
+				BCUiAnimations::UpdatePhase(s_YoutubePhase, YoutubeEnabled ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+			else
+				s_YoutubePhase = YoutubeEnabled ? 1.0f : 0.0f;
+
+			m_YoutubeShortsCapture.Update(YoutubeEnabled);
+
+			CUIRect YoutubeRow;
+			MainView.HSplitTop(LineSize, &YoutubeRow, &MainView);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkYoutubeShorts, Localize("Show YouTube Shorts"), &g_Config.m_DdkYoutubeShorts, &YoutubeRow, LineSize);
+			MainView.HSplitTop(MarginSmall, nullptr, &MainView);
+
+			if(YoutubeEnabled)
+			{
+				CUIRect CropRow, ZoomRow;
+				MainView.HSplitTop(LineSize, &CropRow, &MainView);
+				Ui()->DoScrollbarOption(&g_Config.m_DdkYoutubeShortsCropTop, &g_Config.m_DdkYoutubeShortsCropTop, &CropRow, Localize("Crop from top (tabs/address bar)"), 0, 400, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_MULTILINE, "px");
+				MainView.HSplitTop(MarginSmall, nullptr, &MainView);
+
+				MainView.HSplitTop(LineSize, &ZoomRow, &MainView);
+				Ui()->DoScrollbarOption(&g_Config.m_DdkYoutubeShortsZoom, &g_Config.m_DdkYoutubeShortsZoom, &ZoomRow, Localize("Zoom"), 100, 400, &CUi::ms_LinearScrollbarScale, CUi::SCROLLBAR_OPTION_MULTILINE, "%");
+				MainView.HSplitTop(MarginSmall, nullptr, &MainView);
+			}
+
+			// Expanded content: phone-ratio (9:16) capture panel + scroll buttons.
+			const float ShortsPanelTargetH = 220.0f;
+			const float ShortsButtonsTargetH = LineSize + MarginSmall;
+			const float ShortsExpandTargetH = ShortsPanelTargetH + MarginSmall + ShortsButtonsTargetH;
+			const float ShortsExpandH = ShortsExpandTargetH * s_YoutubePhase;
+
+			if(ShortsExpandH > 0.0f)
+			{
+				CUIRect ShortsBlock;
+				MainView.HSplitTop(ShortsExpandH, &ShortsBlock, &MainView);
+
+				CUIRect Clip = {ShortsBlock.x, ShortsBlock.y, ShortsBlock.w, ShortsExpandH};
+				Ui()->ClipEnable(&Clip);
+				struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+				CUIRect E = {ShortsBlock.x, ShortsBlock.y, ShortsBlock.w, ShortsExpandTargetH};
+
+				CUIRect PanelOuter, ButtonsRow;
+				E.HSplitTop(ShortsPanelTargetH, &PanelOuter, &E);
+				E.HSplitTop(MarginSmall, nullptr, &E);
+				E.HSplitTop(ShortsButtonsTargetH, &ButtonsRow, &E);
+
+				// Center a 9:16 rect within the panel area.
+				CUIRect Panel = PanelOuter;
+				const float MaxPanelWidth = PanelOuter.h * (9.0f / 16.0f);
+				if(Panel.w > MaxPanelWidth)
+				{
+					const float Trim = (Panel.w - MaxPanelWidth) * 0.5f;
+					Panel.VSplitLeft(Trim, nullptr, &Panel);
+					Panel.VSplitLeft(MaxPanelWidth, &Panel, nullptr);
+				}
+				Panel.Draw(ColorRGBA(0, 0, 0, 0.35f), IGraphics::CORNER_ALL, 8.0f);
+
+				// Inset the video slightly so the rounded panel background
+				// behind it shows through as a thin rounded border, since the
+				// texture itself is always drawn as a sharp rectangle.
+				CUIRect VideoRect;
+				Panel.Margin(3.0f, &VideoRect);
+
+				const IGraphics::CTextureHandle ShortsTexture = m_YoutubeShortsCapture.Texture();
+				if(ShortsTexture.IsValid())
+				{
+					Graphics()->WrapClamp();
+					Graphics()->TextureSet(ShortsTexture);
+					Graphics()->QuadsBegin();
+					Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
+					IGraphics::CQuadItem QuadItem(VideoRect.x, VideoRect.y, VideoRect.w, VideoRect.h);
+					Graphics()->QuadsDrawTL(&QuadItem, 1);
+					Graphics()->QuadsEnd();
+					Graphics()->WrapNormal();
+				}
+				else
+				{
+					Ui()->DoLabel(&Panel, m_YoutubeShortsCapture.StatusText(), 14.0f, TEXTALIGN_MC);
+				}
+
+				// Up/down buttons, centered under the panel.
+				CUIRect ButtonsCenter = ButtonsRow;
+				if(ButtonsCenter.w > MaxPanelWidth)
+				{
+					const float Trim = (ButtonsCenter.w - MaxPanelWidth) * 0.5f;
+					ButtonsCenter.VSplitLeft(Trim, nullptr, &ButtonsCenter);
+					ButtonsCenter.VSplitLeft(MaxPanelWidth, &ButtonsCenter, nullptr);
+				}
+				CUIRect UpButton, DownButton;
+				ButtonsCenter.VSplitMid(&UpButton, &DownButton, MarginSmall);
+
+				static CButtonContainer s_ShortsUpButton, s_ShortsDownButton;
+				if(Ui()->DoButton_FontIcon(&s_ShortsUpButton, FontIcon::CHEVRON_UP, 0, &UpButton, BUTTONFLAG_LEFT))
+					m_YoutubeShortsCapture.Scroll(CYoutubeShortsCapture::EScrollDirection::UP);
+				if(Ui()->DoButton_FontIcon(&s_ShortsDownButton, FontIcon::CHEVRON_DOWN, 0, &DownButton, BUTTONFLAG_LEFT))
+					m_YoutubeShortsCapture.Scroll(CYoutubeShortsCapture::EScrollDirection::DOWN);
 			}
 		}
 

@@ -334,5 +334,17 @@ MACRO_CONFIG_INT(DdkHookNoFriends, ddk_hook_no_friends, 0, 0, 1, CFGFLAG_CLIENT 
 MACRO_CONFIG_INT(DdkHookFriendPriority, ddk_hook_friend_priority, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Prioritize hooking frozen friends in range")
 MACRO_CONFIG_INT(DdkHookSilent, ddk_hook_silent, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hook turns toward its target smoothly instead of snapping instantly")
 MACRO_CONFIG_INT(DdkHookAccuracy, ddk_hook_accuracy, 100, 0, 100, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hook aim accuracy percent (lower adds random imprecision)")
+MACRO_CONFIG_INT(DdkHookEdgeScan, ddk_hook_edge_scan, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Auto hook falls back to scanning hitpoints around the target's hitbox when a straight hook shot is blocked")
+
+// DDK AimHelper Visuals: highlight the tee the auto hook is currently targeting. Both require
+// cl_auto_aim to be on to draw anything.
+MACRO_CONFIG_INT(DdkHookDrawFov, ddk_hook_draw_fov, 1, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Draw the auto hook's FOV cone lines (purely visual, the hook still uses the FOV when this is off)")
+MACRO_CONFIG_INT(DdkHookDrawBox, ddk_hook_draw_box, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Outline the current auto hook target's hitbox with a red box")
+MACRO_CONFIG_INT(DdkHookDrawGlow, ddk_hook_draw_glow, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Fill the current auto hook target's hitbox red at 50% opacity (box shape if Draw Box is also on, hitbox circle otherwise)")
+
+// DDK YouTube (Shorts viewer placeholder)
+MACRO_CONFIG_INT(DdkYoutubeShorts, ddk_youtube_shorts, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Show YouTube Shorts panel toggle")
+MACRO_CONFIG_INT(DdkYoutubeShortsCropTop, ddk_youtube_shorts_crop_top, 88, 0, 400, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: YouTube Shorts capture: pixels to crop off the top of the browser window (tabs/address bar)")
+MACRO_CONFIG_INT(DdkYoutubeShortsZoom, ddk_youtube_shorts_zoom, 140, 100, 400, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: YouTube Shorts capture zoom percent (crops in tighter on the video, cutting surrounding YouTube UI)")
 
 
