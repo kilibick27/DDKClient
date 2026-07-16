@@ -342,9 +342,15 @@ MACRO_CONFIG_INT(DdkHookDrawFov, ddk_hook_draw_fov, 1, 0, 1, CFGFLAG_CLIENT | CF
 MACRO_CONFIG_INT(DdkHookDrawBox, ddk_hook_draw_box, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Outline the current auto hook target's hitbox with a red box")
 MACRO_CONFIG_INT(DdkHookDrawGlow, ddk_hook_draw_glow, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Fill the current auto hook target's hitbox red at 50% opacity (box shape if Draw Box is also on, hitbox circle otherwise)")
 
+// DDK LaserHelper
+MACRO_CONFIG_INT(DdkLaserHelper, ddk_laser_helper, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Laser Helper toggle")
+
 // DDK YouTube (Shorts viewer placeholder)
 MACRO_CONFIG_INT(DdkYoutubeShorts, ddk_youtube_shorts, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: Show YouTube Shorts panel toggle")
 MACRO_CONFIG_INT(DdkYoutubeShortsCropTop, ddk_youtube_shorts_crop_top, 88, 0, 400, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: YouTube Shorts capture: pixels to crop off the top of the browser window (tabs/address bar)")
 MACRO_CONFIG_INT(DdkYoutubeShortsZoom, ddk_youtube_shorts_zoom, 140, 100, 400, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: YouTube Shorts capture zoom percent (crops in tighter on the video, cutting surrounding YouTube UI)")
+
+// DDK TASHelper: Follow — free-look camera pans via mouse, tee autopilots toward the look point
+MACRO_CONFIG_INT(DdkTasFollow, ddk_tas_follow, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: TAS Follow Helper toggle")
 
 

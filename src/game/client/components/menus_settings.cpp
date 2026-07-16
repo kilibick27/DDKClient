@@ -3192,8 +3192,8 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 			// Draw Glow has to stay reachable on its own even while Draw Box is off, so nothing
 			// here can be hidden behind a single header toggle.
 			const float VisualsBlockH = MarginSmall + LineSize * 4.0f + MarginSmall;
-			CUIRect VisualsBlock, VisualsTitleRow;
-			RightCol.HSplitTop(VisualsBlockH, &VisualsBlock, nullptr);
+			CUIRect VisualsBlock, VisualsTitleRow, RightColRest;
+			RightCol.HSplitTop(VisualsBlockH, &VisualsBlock, &RightColRest);
 			VisualsBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
 			VisualsBlock.Margin(MarginSmall, &VisualsBlock);
 			VisualsBlock.HSplitTop(LineSize, &VisualsTitleRow, &VisualsBlock);
@@ -3202,7 +3202,24 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookDrawBox, Localize("Draw Box"), &g_Config.m_DdkHookDrawBox, &VisualsBlock, LineSize);
 			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkHookDrawGlow, Localize("Draw Glow"), &g_Config.m_DdkHookDrawGlow, &VisualsBlock, LineSize);
 
-			MainView.HSplitTop(maximum(AimBlockH, VisualsBlockH), nullptr, &MainView);
+			// LaserHelper: placeholder expanding block under the Visuals block. Header row: checkbox
+			// + key bind, same as Aim/Hammer above. Menu content is empty for now.
+			static float s_LaserPhase = 0.0f;
+			const bool LaserEnabled = g_Config.m_DdkLaserHelper != 0;
+			if(g_Config.m_BcModuleUiRevealAnimation)
+				BCUiAnimations::UpdatePhase(s_LaserPhase, LaserEnabled ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+			else
+				s_LaserPhase = LaserEnabled ? 1.0f : 0.0f;
+
+			const float LaserExpandTargetH = 0.0f;
+			const float LaserExpandH = LaserExpandTargetH * s_LaserPhase;
+			const float LaserBlockH = LineSize + MarginSmall + LaserExpandH + MarginSmall;
+
+			CUIRect LaserBlock, LaserRow;
+			RightColRest.HSplitTop(MarginSmall, nullptr, &RightColRest);
+			RightColRest.HSplitTop(LaserBlockH, &LaserBlock, nullptr);
+
+			MainView.HSplitTop(maximum(AimBlockH, VisualsBlockH + MarginSmall + LaserBlockH), nullptr, &MainView);
 			AimBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
 			AimBlock.Margin(MarginSmall, &AimBlock);
 
@@ -3247,6 +3264,26 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 				CUIRect SliderRow2;
 				E.HSplitTop(LineSize, &SliderRow2, &E);
 				Ui()->DoScrollbarOption(&g_Config.m_DdkHookAccuracy, &g_Config.m_DdkHookAccuracy, &SliderRow2, Localize("Accuracy %"), 0, 100, &CUi::ms_LinearScrollbarScale, 0, "");
+			}
+
+			// LaserHelper block: header row only for now (checkbox + key bind), menu content empty.
+			LaserBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+			LaserBlock.Margin(MarginSmall, &LaserBlock);
+			LaserBlock.HSplitTop(LineSize, &LaserRow, &LaserBlock);
+			CUIRect LaserToggle, LaserBind;
+			LaserRow.VSplitRight(90.0f, &LaserToggle, &LaserBind);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkLaserHelper, Localize("Laser Helper"), &g_Config.m_DdkLaserHelper, &LaserToggle, LineSize);
+			static CButtonContainer s_LaserBindReader, s_LaserBindClear;
+			DoKeyReaderForCommand(&LaserBind, s_LaserBindReader, s_LaserBindClear, "toggle ddk_laser_helper 0 1");
+
+			if(LaserExpandH > 0.0f)
+			{
+				CUIRect Clip = {LaserBlock.x, LaserBlock.y, LaserBlock.w, LaserExpandH};
+				Ui()->ClipEnable(&Clip);
+				struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+				CUIRect E = {LaserBlock.x, LaserBlock.y, LaserBlock.w, LaserExpandTargetH};
+				E.HSplitTop(MarginSmall, nullptr, &E);
+				// TODO: Laser Helper options go here.
 			}
 
 			MainView.HSplitTop(MarginSmall, nullptr, &MainView);
@@ -3310,21 +3347,131 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 		}
 		else if(s_DdkTab == DDK_TAB_FLY_HELPER)
 		{
-			// ── FlyHelper ────────────────────────────────────────────────
-			const auto MakeBlock = [&](int *pConf, const char *pLabel) {
+			CUIRect LeftCol, RightCol;
+			MainView.VSplitMid(&LeftCol, &RightCol, MarginSmall);
+
+			// ── CopyMove (left) ──────────────────────────────────────────
+			// Header row: checkbox + key bind. Bound to the same command as the
+			// "Dummy copy" control bind (repeat dummy moves).
+			{
+				const float BlockH = LineSize + MarginSmall + MarginSmall;
 				CUIRect Block, Row;
-				MainView.HSplitTop(LineSize + MarginSmall * 2.0f, &Block, &MainView);
-				Block.Draw(ColorRGBA(1,1,1,0.1f), IGraphics::CORNER_ALL, 6.0f);
+				LeftCol.HSplitTop(BlockH, &Block, &LeftCol);
+				Block.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
 				Block.Margin(MarginSmall, &Block);
 				Block.HSplitTop(LineSize, &Row, &Block);
-				DoButton_CheckBoxAutoVMarginAndSet(pConf, Localize(pLabel), pConf, &Row, LineSize);
-				MainView.HSplitTop(MarginSmall, nullptr, &MainView);
-			};
-			MakeBlock(&g_Config.m_DdkAutoFollowNearest, "Auto Follow Nearest");
-			MakeBlock(&g_Config.m_DdkFlyAimHelper, "Fly Aim Helper");
-			MakeBlock(&g_Config.m_ClDummyCopyMoves, "Dummy Copy Moves");
-			MakeBlock(&g_Config.m_ClDummyCopyMovesWithHammer, "Dummy Copy + Pseudo");
-			MakeBlock(&g_Config.m_ClDummyAutoHook, "Dummy Auto Hook");
+				CUIRect Toggle, Bind;
+				Row.VSplitRight(90.0f, &Toggle, &Bind);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClDummyCopyMoves, Localize("CopyMove"), &g_Config.m_ClDummyCopyMoves, &Toggle, LineSize);
+				static CButtonContainer s_CopyMoveBindReader, s_CopyMoveBindClear;
+				DoKeyReaderForCommand(&Bind, s_CopyMoveBindReader, s_CopyMoveBindClear, "toggle cl_dummy_copy_moves 0 1");
+			}
+
+			LeftCol.HSplitTop(MarginSmall, nullptr, &LeftCol);
+
+			// ── DummyHookHelper (left, expanding) ────────────────────────
+			// Header-only expanding block (checkbox + key bind), no content yet.
+			{
+				static float s_Phase = 0.0f;
+				const bool Enabled = g_Config.m_ClDummyAutoHook != 0;
+				if(g_Config.m_BcModuleUiRevealAnimation)
+					BCUiAnimations::UpdatePhase(s_Phase, Enabled ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+				else
+					s_Phase = Enabled ? 1.0f : 0.0f;
+
+				const float ExpandTargetH = 0.0f;
+				const float ExpandH = ExpandTargetH * s_Phase;
+				const float BlockH = LineSize + MarginSmall + ExpandH + MarginSmall;
+				CUIRect Block, Row;
+				LeftCol.HSplitTop(BlockH, &Block, &LeftCol);
+				Block.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+				Block.Margin(MarginSmall, &Block);
+				Block.HSplitTop(LineSize, &Row, &Block);
+				CUIRect Toggle, Bind;
+				Row.VSplitRight(90.0f, &Toggle, &Bind);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClDummyAutoHook, Localize("DummyHookHelper"), &g_Config.m_ClDummyAutoHook, &Toggle, LineSize);
+				static CButtonContainer s_HookBindReader, s_HookBindClear;
+				DoKeyReaderForCommand(&Bind, s_HookBindReader, s_HookBindClear, "toggle cl_dummy_auto_hook 0 1");
+
+				if(ExpandH > 0.0f)
+				{
+					CUIRect Clip = {Block.x, Block.y, Block.w, ExpandH};
+					Ui()->ClipEnable(&Clip);
+					struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+					CUIRect E = {Block.x, Block.y, Block.w, ExpandTargetH};
+					E.HSplitTop(MarginSmall, nullptr, &E);
+				}
+			}
+
+			LeftCol.HSplitTop(MarginSmall, nullptr, &LeftCol);
+
+			// ── AutoFollow (left, expanding) ─────────────────────────────
+			// Header-only expanding block (checkbox + key bind), no content yet.
+			{
+				static float s_Phase = 0.0f;
+				const bool Enabled = g_Config.m_ClAutoFollow != 0;
+				if(g_Config.m_BcModuleUiRevealAnimation)
+					BCUiAnimations::UpdatePhase(s_Phase, Enabled ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+				else
+					s_Phase = Enabled ? 1.0f : 0.0f;
+
+				const float ExpandTargetH = 0.0f;
+				const float ExpandH = ExpandTargetH * s_Phase;
+				const float BlockH = LineSize + MarginSmall + ExpandH + MarginSmall;
+				CUIRect Block, Row;
+				LeftCol.HSplitTop(BlockH, &Block, &LeftCol);
+				Block.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+				Block.Margin(MarginSmall, &Block);
+				Block.HSplitTop(LineSize, &Row, &Block);
+				CUIRect Toggle, Bind;
+				Row.VSplitRight(90.0f, &Toggle, &Bind);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClAutoFollow, Localize("Auto Follow"), &g_Config.m_ClAutoFollow, &Toggle, LineSize);
+				static CButtonContainer s_FollowBindReader, s_FollowBindClear;
+				DoKeyReaderForCommand(&Bind, s_FollowBindReader, s_FollowBindClear, "toggle cl_auto_follow 0 1");
+
+				if(ExpandH > 0.0f)
+				{
+					CUIRect Clip = {Block.x, Block.y, Block.w, ExpandH};
+					Ui()->ClipEnable(&Clip);
+					struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+					CUIRect E = {Block.x, Block.y, Block.w, ExpandTargetH};
+					E.HSplitTop(MarginSmall, nullptr, &E);
+				}
+			}
+
+			// ── New CopyMove (right, expanding) ──────────────────────────
+			// Header-only expanding block (checkbox + key bind), no content yet.
+			{
+				static float s_Phase = 0.0f;
+				const bool Enabled = g_Config.m_ClDummyCopyMovesWithHammer != 0;
+				if(g_Config.m_BcModuleUiRevealAnimation)
+					BCUiAnimations::UpdatePhase(s_Phase, Enabled ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+				else
+					s_Phase = Enabled ? 1.0f : 0.0f;
+
+				const float ExpandTargetH = 0.0f;
+				const float ExpandH = ExpandTargetH * s_Phase;
+				const float BlockH = LineSize + MarginSmall + ExpandH + MarginSmall;
+				CUIRect Block, Row;
+				RightCol.HSplitTop(BlockH, &Block, &RightCol);
+				Block.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+				Block.Margin(MarginSmall, &Block);
+				Block.HSplitTop(LineSize, &Row, &Block);
+				CUIRect Toggle, Bind;
+				Row.VSplitRight(90.0f, &Toggle, &Bind);
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_ClDummyCopyMovesWithHammer, Localize("New CopyMove"), &g_Config.m_ClDummyCopyMovesWithHammer, &Toggle, LineSize);
+				static CButtonContainer s_NewCopyBindReader, s_NewCopyBindClear;
+				DoKeyReaderForCommand(&Bind, s_NewCopyBindReader, s_NewCopyBindClear, "toggle cl_dummy_copy_moves_with_hammer 0 1");
+
+				if(ExpandH > 0.0f)
+				{
+					CUIRect Clip = {Block.x, Block.y, Block.w, ExpandH};
+					Ui()->ClipEnable(&Clip);
+					struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+					CUIRect E = {Block.x, Block.y, Block.w, ExpandTargetH};
+					E.HSplitTop(MarginSmall, nullptr, &E);
+				}
+			}
 		}
 		else if(s_DdkTab == DDK_TAB_AVOID_HELPER)
 		{
@@ -3425,6 +3572,21 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableHighDetail,  "Disable High Detail",     g_Config.m_GfxHighDetail,               0, 1)
 				#undef POTATO_ITEM
 			}
+		}
+		else if(s_DdkTab == DDK_TAB_TAS_HELPER)
+		{
+			// Follow: camera pans freely via mouse; tee autopilots (walk/hook/jump) toward the look point.
+			CUIRect FollowBlock, FollowRow;
+			MainView.HSplitTop(LineSize + MarginSmall * 2.0f, &FollowBlock, &MainView);
+			FollowBlock.Draw(ColorRGBA(1, 1, 1, 0.1f), IGraphics::CORNER_ALL, 6.0f);
+			FollowBlock.Margin(MarginSmall, &FollowBlock);
+			FollowBlock.HSplitTop(LineSize, &FollowRow, &FollowBlock);
+			CUIRect FollowToggle, FollowBind;
+			FollowRow.VSplitRight(90.0f, &FollowToggle, &FollowBind);
+			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkTasFollow, Localize("Follow"), &g_Config.m_DdkTasFollow, &FollowToggle, LineSize);
+			static CButtonContainer s_FollowBindReader, s_FollowBindClear;
+			DoKeyReaderForCommand(&FollowBind, s_FollowBindReader, s_FollowBindClear, "toggle ddk_tas_follow 0 1");
+			MainView.HSplitTop(MarginSmall, nullptr, &MainView);
 		}
 		else if(s_DdkTab == DDK_TAB_YOUTUBE)
 		{

@@ -15,6 +15,28 @@
 
 static constexpr LOG_COLOR BIND_PRINT_COLOR{255, 255, 204};
 
+// DDK helper binds are configured from the DDK settings tab and are
+// intentionally hidden from the full `binds` console listing.
+static bool IsHiddenDdkBind(const char *pCommand)
+{
+	static const char *s_apHidden[] = {
+		"toggle cl_auto_aim 0 1",
+		"toggle ddk_laser_helper 0 1",
+		"toggle ddk_auto_hammer 0 1",
+		"toggle cl_dummy_copy_moves 0 1",
+		"toggle cl_dummy_auto_hook 0 1",
+		"toggle cl_auto_follow 0 1",
+		"toggle cl_dummy_copy_moves_with_hammer 0 1",
+		"toggle ddk_tas_follow 0 1",
+	};
+	for(const char *pHidden : s_apHidden)
+	{
+		if(str_comp(pCommand, pHidden) == 0)
+			return true;
+	}
+	return false;
+}
+
 bool CBinds::CBindsSpecial::OnInput(const IInput::CEvent &Event)
 {
 	if((Event.m_Flags & (IInput::FLAG_PRESS | IInput::FLAG_RELEASE)) == 0)
@@ -408,6 +430,11 @@ void CBinds::ConBinds(IConsole::IResult *pResult, void *pUserData)
 				if(!pBinds->m_aapKeyBindings[Modifier][Key])
 					continue;
 				char *pBuf = pBinds->GetKeyBindCommand(Modifier, Key);
+				if(IsHiddenDdkBind(pBinds->m_aapKeyBindings[Modifier][Key]))
+				{
+					free(pBuf);
+					continue;
+				}
 				log_info_color(BIND_PRINT_COLOR, "binds", "%s", pBuf);
 				free(pBuf);
 			}
