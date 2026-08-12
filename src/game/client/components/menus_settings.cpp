@@ -3479,98 +3479,195 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 		}
 		else if(s_DdkTab == DDK_TAB_SETTINGS)
 		{
-			// ── Settings: Potato Mode ─────────────────────────────────────
-			static float s_PotatoPhase = 0.0f;
-			const auto UpdatePotatoPhase = [&](float &Phase, bool Expanded) {
-				if(g_Config.m_BcModuleUiRevealAnimation)
-					BCUiAnimations::UpdatePhase(Phase, Expanded ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
-				else
-					Phase = Expanded ? 1.0f : 0.0f;
-			};
+			// Split MainView into two halves: Left = Potato Mode, Right = Button Position
+			CUIRect LeftHalf, RightHalf;
+			MainView.VSplitMid(&LeftHalf, &RightHalf);
+			LeftHalf.VMargin(MarginSmall, &LeftHalf);
+			RightHalf.VMargin(MarginSmall, &RightHalf);
 
-			UpdatePotatoPhase(s_PotatoPhase, g_Config.m_DdkPotatoMode != 0);
-			// 9 checkboxes when expanded
-			const float ExpandTargetH = LineSize * 9.0f + MarginSmall * 9.0f;
-			const float ExpandH = ExpandTargetH * s_PotatoPhase;
-			const float BlockH = LineSize + MarginSmall + ExpandH + MarginSmall;
-
-			CUIRect Block, Row;
-			MainView.HSplitTop(BlockH, &Block, &MainView);
-			Block.Draw(ColorRGBA(1,1,1,0.1f), IGraphics::CORNER_ALL, 6.0f);
-			Block.Margin(MarginSmall, &Block);
-			Block.HSplitTop(LineSize, &Row, &Block);
-
-			// Toggle with instant apply
-			const bool WasPotato = g_Config.m_DdkPotatoMode != 0;
-			DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkPotatoMode, Localize("Potato Mode (boost FPS)"), &g_Config.m_DdkPotatoMode, &Row, LineSize);
-			const bool IsPotato = g_Config.m_DdkPotatoMode != 0;
-
-			if(IsPotato && !WasPotato)
+			// ══════════════════ LEFT HALF: POTATO MODE ══════════════════
 			{
-				// Enabling: save current values then disable selected features
-				g_Config.m_DdkPotatoSavedParticles = g_Config.m_BcOptimizerDisableParticles ? 0 : 1;
-				g_Config.m_DdkPotatoSavedBackgrounds = g_Config.m_BcMenuMediaBackground;
-				g_Config.m_DdkPotatoSavedMotionBlur = g_Config.m_BcMotionBlur;
-				g_Config.m_DdkPotatoSaved3dParticles = g_Config.m_Bc3dParticles;
-				g_Config.m_DdkPotatoSavedTrail = g_Config.m_BcTrail;
-				g_Config.m_DdkPotatoSavedNameplates = g_Config.m_ClNamePlates;
-				g_Config.m_DdkPotatoSavedChat = g_Config.m_ClShowChat;
-				g_Config.m_DdkPotatoSavedHighDetail = g_Config.m_GfxHighDetail;
+				CUIRect &WorkArea = LeftHalf;
+				
+				// ── Settings: Potato Mode ─────────────────────────────────────
+				static float s_PotatoPhase = 0.0f;
+				const auto UpdatePotatoPhase = [&](float &Phase, bool Expanded) {
+					if(g_Config.m_BcModuleUiRevealAnimation)
+						BCUiAnimations::UpdatePhase(Phase, Expanded ? 1.0f : 0.0f, Client()->RenderFrameTime(), g_Config.m_BcModuleUiRevealAnimationMs / 1000.0f);
+					else
+						Phase = Expanded ? 1.0f : 0.0f;
+				};
 
-				if(g_Config.m_DdkPotatoDisableParticles) g_Config.m_BcOptimizerDisableParticles = 1;
-				if(g_Config.m_DdkPotatoDisableBackground) { g_Config.m_BcMenuMediaBackground = 0; g_Config.m_BcGameMediaBackground = 0; }
-				if(g_Config.m_DdkPotatoDisableMotionBlur) g_Config.m_BcMotionBlur = 0;
-				if(g_Config.m_DdkPotatoDisable3dParticles) g_Config.m_Bc3dParticles = 0;
-				if(g_Config.m_DdkPotatoDisableTrail) g_Config.m_BcTrail = 0;
-				if(g_Config.m_DdkPotatoDisableJelly) g_Config.m_BcJellyTee = 0;
-				if(g_Config.m_DdkPotatoDisableNameplates) g_Config.m_ClNamePlates = 0;
-				if(g_Config.m_DdkPotatoDisableChat) g_Config.m_ClShowChat = 0;
-				if(g_Config.m_DdkPotatoDisableHighDetail) g_Config.m_GfxHighDetail = 0;
-			}
-			else if(!IsPotato && WasPotato)
-			{
-				// Disabling: restore saved values
-				if(g_Config.m_DdkPotatoDisableParticles) g_Config.m_BcOptimizerDisableParticles = (g_Config.m_DdkPotatoSavedParticles == 0) ? 1 : 0;
-				if(g_Config.m_DdkPotatoDisableBackground) g_Config.m_BcMenuMediaBackground = g_Config.m_DdkPotatoSavedBackgrounds;
-				if(g_Config.m_DdkPotatoDisableMotionBlur) g_Config.m_BcMotionBlur = g_Config.m_DdkPotatoSavedMotionBlur;
-				if(g_Config.m_DdkPotatoDisable3dParticles) g_Config.m_Bc3dParticles = g_Config.m_DdkPotatoSaved3dParticles;
-				if(g_Config.m_DdkPotatoDisableTrail) g_Config.m_BcTrail = g_Config.m_DdkPotatoSavedTrail;
-				if(g_Config.m_DdkPotatoDisableJelly) g_Config.m_BcJellyTee = 0;
-				if(g_Config.m_DdkPotatoDisableNameplates) g_Config.m_ClNamePlates = g_Config.m_DdkPotatoSavedNameplates;
-				if(g_Config.m_DdkPotatoDisableChat) g_Config.m_ClShowChat = g_Config.m_DdkPotatoSavedChat;
-				if(g_Config.m_DdkPotatoDisableHighDetail) g_Config.m_GfxHighDetail = g_Config.m_DdkPotatoSavedHighDetail;
-			}
+				UpdatePotatoPhase(s_PotatoPhase, g_Config.m_DdkPotatoMode != 0);
+				// 9 checkboxes when expanded
+				const float ExpandTargetH = LineSize * 9.0f + MarginSmall * 9.0f;
+				const float ExpandH = ExpandTargetH * s_PotatoPhase;
+				const float BlockH = LineSize + MarginSmall + ExpandH + MarginSmall;
 
-			// Expanded content — each item is a clickable checkbox
-			if(ExpandH > 0.0f)
-			{
-				CUIRect Clip = {Block.x, Block.y, Block.w, ExpandH};
-				Ui()->ClipEnable(&Clip);
-				struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
-				CUIRect E = {Block.x, Block.y, Block.w, ExpandTargetH};
-				E.HSplitTop(MarginSmall, nullptr, &E);
+				CUIRect Block, Row;
+				WorkArea.HSplitTop(BlockH, &Block, &WorkArea);
+				Block.Draw(ColorRGBA(1,1,1,0.1f), IGraphics::CORNER_ALL, 6.0f);
+				Block.Margin(MarginSmall, &Block);
+				Block.HSplitTop(LineSize, &Row, &Block);
 
-				#define POTATO_ITEM(Er, pFlag, Label, Target, OnVal, OffVal) \
-				{ \
-					CUIRect _Row; (Er).HSplitTop(LineSize, &_Row, &(Er)); (Er).HSplitTop(MarginSmall, nullptr, &(Er)); \
-					CUIRect _Dot, _Text; _Row.VSplitLeft(14.0f, &_Dot, &_Text); \
-					Graphics()->DrawRect(_Dot.x+2.f, _Dot.y+(_Dot.h-8.f)/2.f, 8.f, 8.f, \
-						*(pFlag) ? ColorRGBA(.3f,.9f,.3f,.9f) : ColorRGBA(.5f,.5f,.5f,.35f), IGraphics::CORNER_ALL, 4.f); \
-					const int _Old = *(pFlag); \
-					DoButton_CheckBoxAutoVMarginAndSet((pFlag), Localize(Label), (pFlag), &_Text, LineSize); \
-					if(IsPotato && *(pFlag) != _Old) { (Target) = *(pFlag) ? (OnVal) : (OffVal); } \
+				// Toggle with instant apply
+				const bool WasPotato = g_Config.m_DdkPotatoMode != 0;
+				DoButton_CheckBoxAutoVMarginAndSet(&g_Config.m_DdkPotatoMode, Localize("Potato Mode (boost FPS)"), &g_Config.m_DdkPotatoMode, &Row, LineSize);
+				const bool IsPotato = g_Config.m_DdkPotatoMode != 0;
+
+				if(IsPotato && !WasPotato)
+				{
+					// Enabling: save current values then disable selected features
+					g_Config.m_DdkPotatoSavedParticles = g_Config.m_BcOptimizerDisableParticles ? 0 : 1;
+					g_Config.m_DdkPotatoSavedBackgrounds = g_Config.m_BcMenuMediaBackground;
+					g_Config.m_DdkPotatoSavedMotionBlur = g_Config.m_BcMotionBlur;
+					g_Config.m_DdkPotatoSaved3dParticles = g_Config.m_Bc3dParticles;
+					g_Config.m_DdkPotatoSavedTrail = g_Config.m_BcTrail;
+					g_Config.m_DdkPotatoSavedNameplates = g_Config.m_ClNamePlates;
+					g_Config.m_DdkPotatoSavedChat = g_Config.m_ClShowChat;
+					g_Config.m_DdkPotatoSavedHighDetail = g_Config.m_GfxHighDetail;
+
+					if(g_Config.m_DdkPotatoDisableParticles) g_Config.m_BcOptimizerDisableParticles = 1;
+					if(g_Config.m_DdkPotatoDisableBackground) { g_Config.m_BcMenuMediaBackground = 0; g_Config.m_BcGameMediaBackground = 0; }
+					if(g_Config.m_DdkPotatoDisableMotionBlur) g_Config.m_BcMotionBlur = 0;
+					if(g_Config.m_DdkPotatoDisable3dParticles) g_Config.m_Bc3dParticles = 0;
+					if(g_Config.m_DdkPotatoDisableTrail) g_Config.m_BcTrail = 0;
+					if(g_Config.m_DdkPotatoDisableJelly) g_Config.m_BcJellyTee = 0;
+					if(g_Config.m_DdkPotatoDisableNameplates) g_Config.m_ClNamePlates = 0;
+					if(g_Config.m_DdkPotatoDisableChat) g_Config.m_ClShowChat = 0;
+					if(g_Config.m_DdkPotatoDisableHighDetail) g_Config.m_GfxHighDetail = 0;
+				}
+				else if(!IsPotato && WasPotato)
+				{
+					// Disabling: restore saved values
+					if(g_Config.m_DdkPotatoDisableParticles) g_Config.m_BcOptimizerDisableParticles = (g_Config.m_DdkPotatoSavedParticles == 0) ? 1 : 0;
+					if(g_Config.m_DdkPotatoDisableBackground) g_Config.m_BcMenuMediaBackground = g_Config.m_DdkPotatoSavedBackgrounds;
+					if(g_Config.m_DdkPotatoDisableMotionBlur) g_Config.m_BcMotionBlur = g_Config.m_DdkPotatoSavedMotionBlur;
+					if(g_Config.m_DdkPotatoDisable3dParticles) g_Config.m_Bc3dParticles = g_Config.m_DdkPotatoSaved3dParticles;
+					if(g_Config.m_DdkPotatoDisableTrail) g_Config.m_BcTrail = g_Config.m_DdkPotatoSavedTrail;
+					if(g_Config.m_DdkPotatoDisableJelly) g_Config.m_BcJellyTee = 0;
+					if(g_Config.m_DdkPotatoDisableNameplates) g_Config.m_ClNamePlates = g_Config.m_DdkPotatoSavedNameplates;
+					if(g_Config.m_DdkPotatoDisableChat) g_Config.m_ClShowChat = g_Config.m_DdkPotatoSavedChat;
+					if(g_Config.m_DdkPotatoDisableHighDetail) g_Config.m_GfxHighDetail = g_Config.m_DdkPotatoSavedHighDetail;
 				}
 
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableParticles,  "Disable Particles",       g_Config.m_BcOptimizerDisableParticles, 1, 0)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableMotionBlur,  "Disable Motion Blur",     g_Config.m_BcMotionBlur,                0, 1)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisable3dParticles, "Disable 3D Particles",    g_Config.m_Bc3dParticles,               0, 1)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableTrail,       "Disable Tee Trail",       g_Config.m_BcTrail,                     0, 1)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableJelly,       "Disable Jelly Tee",       g_Config.m_BcJellyTee,                  0, 1)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableBackground,  "Disable Media Background",g_Config.m_BcMenuMediaBackground,       0, 1)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableNameplates,  "Disable Nameplates",      g_Config.m_ClNamePlates,                0, 1)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableChat,        "Disable Chat",            g_Config.m_ClShowChat,                  0, 1)
-				POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableHighDetail,  "Disable High Detail",     g_Config.m_GfxHighDetail,               0, 1)
-				#undef POTATO_ITEM
+				// Expanded content — each item is a clickable checkbox
+				if(ExpandH > 0.0f)
+				{
+					CUIRect Clip = {Block.x, Block.y, Block.w, ExpandH};
+					Ui()->ClipEnable(&Clip);
+					struct SClipGuard { CUi *p; ~SClipGuard(){p->ClipDisable();} } G{Ui()};
+					CUIRect E = {Block.x, Block.y, Block.w, ExpandTargetH};
+					E.HSplitTop(MarginSmall, nullptr, &E);
+
+					#define POTATO_ITEM(Er, pFlag, Label, Target, OnVal, OffVal) \
+					{ \
+						CUIRect _Row; (Er).HSplitTop(LineSize, &_Row, &(Er)); (Er).HSplitTop(MarginSmall, nullptr, &(Er)); \
+						CUIRect _Dot, _Text; _Row.VSplitLeft(14.0f, &_Dot, &_Text); \
+						Graphics()->DrawRect(_Dot.x+2.f, _Dot.y+(_Dot.h-8.f)/2.f, 8.f, 8.f, \
+							*(pFlag) ? ColorRGBA(.3f,.9f,.3f,.9f) : ColorRGBA(.5f,.5f,.5f,.35f), IGraphics::CORNER_ALL, 4.f); \
+						const int _Old = *(pFlag); \
+						DoButton_CheckBoxAutoVMarginAndSet((pFlag), Localize(Label), (pFlag), &_Text, LineSize); \
+						if(IsPotato && *(pFlag) != _Old) { (Target) = *(pFlag) ? (OnVal) : (OffVal); } \
+					}
+
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableParticles,  "Disable Particles",       g_Config.m_BcOptimizerDisableParticles, 1, 0)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableMotionBlur,  "Disable Motion Blur",     g_Config.m_BcMotionBlur,                0, 1)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisable3dParticles, "Disable 3D Particles",    g_Config.m_Bc3dParticles,               0, 1)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableTrail,       "Disable Tee Trail",       g_Config.m_BcTrail,                     0, 1)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableJelly,       "Disable Jelly Tee",       g_Config.m_BcJellyTee,                  0, 1)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableBackground,  "Disable Media Background",g_Config.m_BcMenuMediaBackground,       0, 1)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableNameplates,  "Disable Nameplates",      g_Config.m_ClNamePlates,                0, 1)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableChat,        "Disable Chat",            g_Config.m_ClShowChat,                  0, 1)
+					POTATO_ITEM(E, &g_Config.m_DdkPotatoDisableHighDetail,  "Disable High Detail",     g_Config.m_GfxHighDetail,               0, 1)
+					#undef POTATO_ITEM
+				}
+			}
+
+			// ══════════════════ RIGHT HALF: SECRET BUTTON POSITION ══════════════════
+			{
+				CUIRect &WorkArea = RightHalf;
+				
+				// Title
+				CUIRect TitleRow;
+				WorkArea.HSplitTop(LineSize, &TitleRow, &WorkArea);
+				Ui()->DoLabel(&TitleRow, Localize("Secret Button Position"), 14.0f, TEXTALIGN_ML);
+				WorkArea.HSplitTop(MarginSmall, nullptr, &WorkArea);
+				
+				// Description
+				CUIRect DescRow;
+				WorkArea.HSplitTop(LineSize, &DescRow, &WorkArea);
+				Ui()->DoLabel(&DescRow, Localize("Click a laser dot to set it as DDK tab opener:"), 12.0f, TEXTALIGN_ML);
+				WorkArea.HSplitTop(MarginSmall * 2, nullptr, &WorkArea);
+
+				// Draw 5 laser previews with radio-button style selection
+				const char *aLaserNames[] = {"Rifle", "Shotgun", "Door", "Freeze", "Dragger"};
+				const int aLaserTypes[] = {LASERTYPE_RIFLE, LASERTYPE_SHOTGUN, LASERTYPE_DOOR, LASERTYPE_FREEZE, LASERTYPE_DRAGGER};
+				const ColorHSLA aOutlineColors[] = {
+					ColorHSLA(g_Config.m_ClLaserRifleOutlineColor),
+					ColorHSLA(g_Config.m_ClLaserShotgunOutlineColor),
+					ColorHSLA(g_Config.m_ClLaserDoorOutlineColor),
+					ColorHSLA(g_Config.m_ClLaserFreezeOutlineColor),
+					ColorHSLA(g_Config.m_ClLaserDraggerOutlineColor)
+				};
+				const ColorHSLA aInnerColors[] = {
+					ColorHSLA(g_Config.m_ClLaserRifleInnerColor),
+					ColorHSLA(g_Config.m_ClLaserShotgunInnerColor),
+					ColorHSLA(g_Config.m_ClLaserDoorInnerColor),
+					ColorHSLA(g_Config.m_ClLaserFreezeInnerColor),
+					ColorHSLA(g_Config.m_ClLaserDraggerInnerColor)
+				};
+
+				for(int i = 0; i < 5; i++)
+				{
+					CUIRect LaserRow, NameLabel, PreviewRect, RadioButton;
+					WorkArea.HSplitTop(LineSize + 4.0f, &LaserRow, &WorkArea);
+					
+					// Radio button (left)
+					LaserRow.VSplitLeft(20.0f, &RadioButton, &LaserRow);
+					const bool IsSelected = (g_Config.m_DdkSecretButtonPos == i);
+					
+					// Draw radio circle
+					const float RadioSize = 12.0f;
+					const float RadioX = RadioButton.x + RadioButton.w / 2.0f;
+					const float RadioY = RadioButton.y + RadioButton.h / 2.0f;
+					Graphics()->DrawCircle(RadioX, RadioY, RadioSize / 2.0f, 16);
+					if(IsSelected)
+					{
+						// Fill inner circle if selected
+						Graphics()->DrawCircle(RadioX, RadioY, RadioSize / 3.5f, 16);
+					}
+					
+					// Laser name (next to radio)
+					LaserRow.VSplitLeft(60.0f, &NameLabel, &LaserRow);
+					Ui()->DoLabel(&NameLabel, aLaserNames[i], 12.0f, TEXTALIGN_ML);
+					
+					// Laser preview (rest of row)
+					PreviewRect = LaserRow;
+					PreviewRect.h = 40.0f;
+					
+					// Draw laser
+					vec2 From = vec2(PreviewRect.x + 10.0f, PreviewRect.y + PreviewRect.h / 2.0f);
+					vec2 To = vec2(PreviewRect.x + PreviewRect.w - 10.0f, PreviewRect.y + PreviewRect.h / 2.0f);
+					const ColorRGBA OuterColor = color_cast<ColorRGBA>(aOutlineColors[i]);
+					const ColorRGBA InnerColor = color_cast<ColorRGBA>(aInnerColors[i]);
+					const float TicksHead = Client()->GlobalTime() * Client()->GameTickSpeed();
+					GameClient()->m_Items.RenderLaser(From, To, OuterColor, InnerColor, 4.0f, TicksHead, aLaserTypes[i]);
+					
+					// Clickable area - select this position
+					if(Ui()->MouseHovered(&LaserRow) && Ui()->MouseButtonClicked(0))
+					{
+						g_Config.m_DdkSecretButtonPos = i;
+					}
+					
+					// Highlight selected row
+					if(IsSelected)
+					{
+						LaserRow.Draw(ColorRGBA(0.3f, 0.9f, 0.3f, 0.15f), IGraphics::CORNER_ALL, 4.0f);
+					}
+					
+					WorkArea.HSplitTop(MarginSmall, nullptr, &WorkArea);
+				}
 			}
 		}
 		else if(s_DdkTab == DDK_TAB_TAS_HELPER)

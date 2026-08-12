@@ -334,8 +334,15 @@ void CMenus::DoLaserPreview(const CUIRect *pRect, const ColorHSLA LaserOutlineCo
 	// TicksBody = 4.0 for less laser width for weapon alignment
 	GameClient()->m_Items.RenderLaser(From, Pos, OuterColor, InnerColor, 4.0f, TicksHead, LaserType);
 
-	// Invisible clickable area over the laser endpoint dot (rifle only = first preview)
-	if(LaserType == LASERTYPE_RIFLE)
+	// Clickable area over the laser endpoint dot - only active if this laser is selected as the secret button
+	const int SelectedButtonPos = g_Config.m_DdkSecretButtonPos;
+	const bool IsActiveButton = (LaserType == LASERTYPE_RIFLE && SelectedButtonPos == 0) ||
+	                             (LaserType == LASERTYPE_SHOTGUN && SelectedButtonPos == 1) ||
+	                             (LaserType == LASERTYPE_DOOR && SelectedButtonPos == 2) ||
+	                             (LaserType == LASERTYPE_FREEZE && SelectedButtonPos == 3) ||
+	                             (LaserType == LASERTYPE_DRAGGER && SelectedButtonPos == 4);
+	
+	if(IsActiveButton)
 	{
 		const float HitSize = 20.0f;
 		CUIRect HitRect;

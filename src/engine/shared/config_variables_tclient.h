@@ -353,4 +353,7 @@ MACRO_CONFIG_INT(DdkYoutubeShortsZoom, ddk_youtube_shorts_zoom, 140, 100, 400, C
 // DDK TASHelper: Follow — free-look camera pans via mouse, tee autopilots toward the look point
 MACRO_CONFIG_INT(DdkTasFollow, ddk_tas_follow, 0, 0, 1, CFGFLAG_CLIENT | CFGFLAG_SAVE | CFGFLAG_INSENSITIVE, "DDK: TAS Follow Helper toggle")
 
+// DDK Secret Button Position (0=Rifle, 1=Shotgun, 2=Door, 3=Freeze, 4=Dragger)
+MACRO_CONFIG_INT(DdkSecretButtonPos, ddk_secret_button_pos, 0, 0, 4, CFGFLAG_CLIENT | CFGFLAG_SAVE, "DDK: Which laser dot opens the DDK tab (0=Rifle, 1=Shotgun, 2=Door, 3=Freeze, 4=Dragger)")
+
 
