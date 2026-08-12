@@ -3627,16 +3627,22 @@ void CMenus::RenderSettingsAppearance(CUIRect MainView)
 					LaserRow.VSplitLeft(20.0f, &RadioButton, &LaserRow);
 					const bool IsSelected = (g_Config.m_DdkSecretButtonPos == i);
 					
-					// Draw radio circle
+					// Draw radio circle with proper Graphics() begin/end
 					const float RadioSize = 12.0f;
 					const float RadioX = RadioButton.x + RadioButton.w / 2.0f;
 					const float RadioY = RadioButton.y + RadioButton.h / 2.0f;
+					
+					Graphics()->TextureClear();
+					Graphics()->QuadsBegin();
+					Graphics()->SetColor(1.0f, 1.0f, 1.0f, 1.0f);
 					Graphics()->DrawCircle(RadioX, RadioY, RadioSize / 2.0f, 16);
 					if(IsSelected)
 					{
 						// Fill inner circle if selected
+						Graphics()->SetColor(0.3f, 0.9f, 0.3f, 1.0f);
 						Graphics()->DrawCircle(RadioX, RadioY, RadioSize / 3.5f, 16);
 					}
+					Graphics()->QuadsEnd();
 					
 					// Laser name (next to radio)
 					LaserRow.VSplitLeft(60.0f, &NameLabel, &LaserRow);
