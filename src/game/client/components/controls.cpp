@@ -37,7 +37,8 @@ CControls::CControls()
 	std::fill(std::begin(m_aMouseInputType), std::end(m_aMouseInputType), EMouseInputType::ABSOLUTE);
 	m_AutoFollowTargetId = -1;
 	m_DummyAutoHookTargetId = -1;
-	std::fill(std::begin(m_aAutoHammerLastFireTick), std::end(m_aAutoHammerLastFireTick), 0);
+	std::fill(std::begin(m_aAutoHammerLastFireTick), std::end(m_aAutoHammerLastFireTick), -999999);
+	std::fill(std::begin(m_aFastHammerLastFireTick), std::end(m_aFastHammerLastFireTick), -999999);
 	m_AutoAimHookTargetId = -1;
 }
 
@@ -50,6 +51,11 @@ void CControls::OnReset()
 		AmmoCount = 0;
 
 	m_LastSendTime = 0;
+	
+	// Reset Auto Hammer tick counters when changing servers
+	// Use -999999 so the first hammer fire is immediate on new server
+	std::fill(std::begin(m_aAutoHammerLastFireTick), std::end(m_aAutoHammerLastFireTick), -999999);
+	std::fill(std::begin(m_aFastHammerLastFireTick), std::end(m_aFastHammerLastFireTick), -999999);
 }
 
 void CControls::ResetInput(int Dummy)
